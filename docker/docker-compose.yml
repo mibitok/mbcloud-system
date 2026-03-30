@@ -1,0 +1,35 @@
+# docker/docker-compose.yml
+version: '3.8'
+
+services:
+  immich-server:
+    image: ghcr.io/immich-app/immich-server:latest
+    container_name: immich_server
+    volumes:
+      - /DATA/photos:/usr/src/app/upload
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - DB_HOSTNAME=immich-database
+      - REDIS_HOSTNAME=immich-redis
+    ports:
+      - "2283:2283"
+    depends_on:
+      - immich-database
+      - immich-redis
+    restart: unless-stopped
+
+  immich-database:
+    image: tensorchord/pgvecto-rs:pg14-v0.2.0
+    container_name: immich_database
+    volumes:
+      - /DATA/immich-postgres:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_PASSWORD=immich_password
+      - POSTGRES_USER=immich
+      - POSTGRES_DB=immich
+    restart: unless-stopped
+
+  immich-redis:
+    image: redis:6.2-alpine
+    container_name: immich_redis
+    restart: unless-stopped
