@@ -1,0 +1,7 @@
+psutil>=5.9.0
+gpiozero>=2.0
+Pillow>=9.0.0
+# Драйвер дисплея (раскомментируйте нужный):
+# waveshare-st7789==1.0.0
+# или для Waveshare 2.4inch IPS:
+# waveshare-2.4inch-IPS==1.0.0
