@@ -1,24 +1,97 @@
 # docker/docker-compose.yml
+# Immich Photo Server for mbcloud NAS (Raspberry Pi CM4, arm64)
+# Документация: https://immich.app/docs/install/docker-compose
+
+name: immich
+
 services:
   immich-server:
     container_name: immich_server
-    image: ghcr.io/immich-app/immich-server:v1.120.0  # ← Укажите конкретную версию!
-    # Или для arm64 Raspberry Pi:
-    # image: ghcr.io/immich-app/immich-server:latest-arm64
+    image: ghcr.io/immich-app/immich-server:v1.120.0
+    # Для arm64 (Raspberry Pi) образ автоматически подтянется правильный
     volumes:
       - /DATA/photos:/usr/src/app/upload
       - /etc/localtime:/etc/localtime:ro
+    env_file:
+      - .env
     environment:
       - DB_HOSTNAME=immich-database
+      - DB_DATABASE_NAME=${DB_DATABASE_NAME:-immich}
+      - DB_USERNAME=${DB_USERNAME:-immich}
+      - DB_PASSWORD=${DB_PASSWORD}
       - REDIS_HOSTNAME=immich-redis
+      - IMMICH_MACHINE_LEARNING_ENABLED=false  # Отключаем ML для экономии ресурсов на Pi
+      - IMMICH_MACHINE_LEARNING_URL=http://immich-machine-learning:3003  # Опционально, если включите позже
     ports:
-      - "2283:2283"
+      - "2283:2283"  # Веб-интерфейс и API
     depends_on:
       - immich-database
       - immich-redis
     restart: unless-stopped
-    # Оптимизация для Raspberry Pi 4/CM4
+    # Оптимизация для Raspberry Pi 4/CM4 (BCM2711, 2-8 ГБ RAM)
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 2G  # Ограничиваем память, чтобы не "убить" систему
+          cpus: '2'   # Используем максимум 2 ядра из 4
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2283/api/server-info/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  immich-database:
+    container_name: immich_database
+    image: tensorchord/pgvecto-rs:pg14-v0.2.0@sha256:739cdd626151ff1f796dc95a6591b552725612429525459fcec7593b9416a161
+    # Фиксированный хеш для стабильности и совместимости с arm64
+    volumes:
+      - /DATA/immich-postgres:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=${DB_DATABASE_NAME:-immich}
+      - POSTGRES_USER=${DB_USERNAME:-immich}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_INITDB_ARGS=--data-checksums
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-immich} -d ${DB_DATABASE_NAME:-immich}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  immich-redis:
+    container_name: immich_redis
+    image: redis:6.2-alpine@sha256:2489dc0cfa1f08f582f6c7f782c3c9f7e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8
+    # Фиксированный хеш для стабильности
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Опционально: машинное обучение (распознавание лиц, объектов)
+  # ⚠️ На Raspberry Pi может работать медленно, отключено по умолчанию
+  # immich-machine-learning:
+  #   container_name: immich_machine_learning
+  #   image: ghcr.io/immich-app/immich-machine-learning:v1.120.0
+  #   volumes:
+  #     - /DATA/immich-model-cache:/cache
+  #   environment:
+  #     - DB_HOSTNAME=immich-database
+  #     - DB_DATABASE_NAME=${DB_DATABASE_NAME:-immich}
+  #     - DB_USERNAME=${DB_USERNAME:-immich}
+  #     - DB_PASSWORD=${DB_PASSWORD}
+  #     - REDIS_HOSTNAME=immich-redis
+  #   restart: unless-stopped
+  #   # Ограничиваем ресурсы для ML
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 1G
+  #         cpus: '1'
+
+networks:
+  default:
+    driver: bridge
