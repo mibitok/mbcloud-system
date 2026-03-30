@@ -1,0 +1,15 @@
+# display/mbcloud-display.service
+[Unit]
+Description=mbcloud NAS LCD Display Service
+After=network.target multi-user.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/mbcloud-system/display
+ExecStart=/usr/bin/python3 /home/pi/mbcloud-system/display/main.py
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
