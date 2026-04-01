@@ -46,7 +46,7 @@ header() {
     echo ""
     echo -e "${GREEN}${BOLD}╔════════════════════════════════════╗${NC}"
     echo -e "${GREEN}${BOLD}║  mbcloud FIX & DIAGNOSTIC v1.0     ║${NC}"
-    echo -e "${GREEN}${BOD}╚════════════════════════════════════╝${NC}"
+    echo -e "${GREEN}${BOLD}╚════════════════════════════════════╝${NC}"
     echo "  Время: $(date '+%Y-%m-%d %H:%M:%S')"
     echo "  Пользователь: $USER $([ $EUID -eq 0 ] && echo '(root)' || echo '')"
     echo "  Режим: $([ "$AUTO_MODE" = true ] && echo "🤖 Auto" || echo "👤 Interactive")"
