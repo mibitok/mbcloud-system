@@ -4,6 +4,7 @@
 mbcloud NAS - LCD Display Controller
 CM4-NAS-Double-Deck (Waveshare 2.4" IPS 320x240)
 Ретро-стиль 70-х + шрифт Baveuse
+GitHub: https://github.com/mibitok/mbcloud-system
 """
 
 import sys
@@ -31,16 +32,17 @@ COLOR_TEXT = (255, 255, 255)
 COLOR_WARN = (255, 165, 0)
 COLOR_ERROR = (255, 50, 50)
 
-# 🔘 Пины GPIO
+# 🔘 Пины GPIO (Waveshare CM4-NAS-Double-Deck)
 PIN_LCD_RST = 24
 PIN_LCD_DC = 25
-PIN_FAN_PWM = 18
+PIN_LCD_BL = 18      # 🔆 Подсветка дисплея (не вентилятор!)
+PIN_FAN_PWM = 19     # 🌬️ Вентилятор (ИСПРАВЛЕНО: был 18, должен быть 19)
 PIN_BTN_PWR = 26
 PIN_BTN_USER = 20
 
 # ⚙️ Настройки
 SLEEP_TIMEOUT = 60
-FAN_TEMP_THRESHOLD = 70  # 🔥 Порог включения вентилятора (70°C)
+FAN_TEMP_THRESHOLD = 60  # Порог включения вентилятора
 FAN_MAX_SPEED = 0.8
 TOTAL_PAGES = 5
 
@@ -74,13 +76,15 @@ except Exception as e:
     disp = DummyDisplay()
 
 # ============================================================================
-# 💨 ВЕНТИЛЯТОР
+# 💨 ВЕНТИЛЯТОР (ИСПРАВЛЕНО: GPIO 19)
 # ============================================================================
+fan = None
 try:
     from gpiozero import PWMOutputDevice
-    fan = PWMOutputDevice(PIN_FAN_PWM, frequency=100)
-    fan.value = 0
-    print("✅ Fan PWM initialized at 100Hz")
+    # 🔧 GPIO 19, частота 10000 Hz (lgpio не поддерживает 25000), active_high=True
+    fan = PWMOutputDevice(PIN_FAN_PWM, frequency=10000, active_high=True)
+    fan.value = 0  # Старт с выключенным
+    print(f"✅ Fan PWM initialized on GPIO {PIN_FAN_PWM} at 10kHz")
 except Exception as e:
     print(f"⚠️  Fan init failed: {e}")
     class DummyFan:
@@ -301,7 +305,7 @@ def draw_page_dashboard():
         f_big = get_font(24)
     draw.text((tx, 105), ts, font=f_big, fill=COLOR_TIME)
     
-    fs = "ON" if hasattr(fan, 'value') and fan.value > 0 else "OFF"
+    fs = "ON" if fan and fan.value > 0 else "OFF"
     draw.text((10, DISPLAY_HEIGHT - 25), f"[FAN] {fs}", font=f_normal, fill=(200, 200, 255))
     
     pp = ((current_page + 1) / TOTAL_PAGES) * 100
@@ -459,12 +463,18 @@ def shutdown_system():
     os.system("sudo shutdown -h now")
 
 def control_fan():
-    """Управление вентилятором"""
+    """Управление вентилятором (GPIO 19, non-inverted PWM)"""
+    if not fan:
+        return
+    
     t = get_cpu_temp()
+    
     if t < FAN_TEMP_THRESHOLD:
-        fan.value = 0
+        fan.value = 0  # Выключен
     else:
-        fan.value = min(FAN_MAX_SPEED, 0.3 + (t - FAN_TEMP_THRESHOLD) * 0.05)
+        # Плавное увеличение скорости выше порога
+        speed = min(FAN_MAX_SPEED, 0.3 + (t - FAN_TEMP_THRESHOLD) * 0.05)
+        fan.value = speed  # Без инверсии для GPIO 19
 
 def check_sleep():
     """Проверка таймаута сна"""
@@ -489,7 +499,8 @@ except:
 # ============================================================================
 def main():
     print("🖥️  mbcloud Display Controller starting...")
-    print(f"📁 Font path: {BAVEUSE_FONT} | Exists: {os.path.exists(BAVEUSE_FONT)}")
+    print(f"📁 Font: {BAVEUSE_FONT} | Exists: {os.path.exists(BAVEUSE_FONT)}")
+    print(f"🌬️  Fan: GPIO {PIN_FAN_PWM} @ 10kHz")
     
     threading.Thread(target=check_sleep, daemon=True).start()
     update_display()
@@ -503,7 +514,8 @@ def main():
             time.sleep(0.1)
     except KeyboardInterrupt:
         print("\n👋 Shutting down...")
-        fan.value = 0
+        if fan:
+            fan.value = 0
         if DISPLAY_AVAILABLE:
             disp.clear()
 
