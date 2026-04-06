@@ -1,0 +1,51 @@
+
+---
+
+## 📦 Что загрузить на GitHub (чек-лист)
+
+| Файл/Папка | Назначение | Обязательно |
+|------------|------------|-------------|
+| `scripts/setup-mbcloud.sh` | 🔥 Главный скрипт установки | ✅ Да |
+| `display/main.py` | Код дисплея (скачивается скриптом) | ✅ Да |
+| `display/fonts/baveuse_0.ttf` | Ретро-шрифт | ✅ Да |
+| `systemd/mbcloud-display.service` | systemd unit файл | ✅ Да |
+| `display/requirements.txt` | Python-зависимости | ✅ Да |
+| `config/config.txt.additions` | Дополнения к boot config | ✅ Да |
+| `docker/docker-compose.yml` | Immich конфигурация | ✅ Да |
+| `README.md` | Документация | ✅ Да |
+| `LICENSE` | Лицензия | ✅ Да |
+| `.gitignore` | Исключения для git | ✅ Да |
+| `scripts/mbcloud-diagnose.sh` | Диагностика | ⚪ Опционально |
+| `scripts/mbcloud-fix.sh` | Авто-исправление | ⚪ Опционально |
+| `docs/` | Расширенная документация | ⚪ Опционально |
+
+---
+
+## 🚀 Как загрузить файлы на GitHub
+
+### На компьютере (Windows + Git Bash):
+
+```bash
+cd ~/Projects/mbcloud-system
+
+# 1. Создайте структуру папок
+mkdir -p display/fonts scripts systemd docker config docs
+
+# 2. Создайте/скопировайте файлы (см. выше)
+
+# 3. Создайте .gitignore
+cat > .gitignore << 'EOF'
+__pycache__/
+*.pyc
+*.log
+*.backup*
+.env
+.DS_Store
+display/main.py.old
+display/main.py.backup*
+EOF
+
+# 4. Закоммитьте и отправьте
+git add .
+git commit -m "Initial commit: setup script, main.py, fonts, systemd, docker"
+git push origin main
