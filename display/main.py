@@ -13,6 +13,7 @@ import time
 import socket
 import psutil
 import threading
+import subprocess
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 
@@ -35,8 +36,8 @@ COLOR_ERROR = (255, 50, 50)
 # 🔘 Пины GPIO (Waveshare CM4-NAS-Double-Deck)
 PIN_LCD_RST = 24
 PIN_LCD_DC = 25
-PIN_LCD_BL = 18      # 🔆 Подсветка дисплея (не вентилятор!)
-PIN_FAN_PWM = 19     # 🌬️ Вентилятор (ИСПРАВЛЕНО: был 18, должен быть 19)
+PIN_LCD_BL = 18      # 🔆 Подсветка дисплея
+PIN_FAN_PWM = 19     # 🌬️ Вентилятор (GPIO 19)
 PIN_BTN_PWR = 26
 PIN_BTN_USER = 20
 
@@ -49,6 +50,57 @@ TOTAL_PAGES = 5
 # 🔤 Пути к шрифтам
 FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
 BAVEUSE_FONT = os.path.join(FONT_PATH, 'baveuse_0.ttf')
+
+# ============================================================================
+# 💨 ВЕНТИЛЯТОР (ПРЯМОЕ УПРАВЛЕНИЕ ЧЕРЕЗ SYSFS)
+# ============================================================================
+class SysfsFan:
+    """Управление вентилятором через /sys/class/gpio (без gpiozero)"""
+    def __init__(self, pin=19):
+        self.pin = pin
+        self._export()
+        self._value = 0
+    
+    def _export(self):
+        try:
+            subprocess.run(f'echo {self.pin} > /sys/class/gpio/export', 
+                          shell=True, capture_output=True, timeout=1)
+            time.sleep(0.1)
+            subprocess.run(f'echo out > /sys/class/gpio/gpio{self.pin}/direction', 
+                          shell=True, capture_output=True, timeout=1)
+        except:
+            pass  # Уже экспортирован
+    
+    def _set_value(self, value):
+        try:
+            subprocess.run(f'echo {int(value)} > /sys/class/gpio/gpio{self.pin}/value', 
+                          shell=True, capture_output=True, timeout=1)
+            self._value = value
+        except Exception as e:
+            print(f"⚠️  Fan set failed: {e}")
+    
+    def close(self):
+        self._set_value(0)
+    
+    @property
+    def value(self):
+        return self._value
+    
+    @value.setter
+    def value(self, val):
+        self._set_value(val)
+
+# Инициализация вентилятора
+fan = None
+try:
+    fan = SysfsFan(pin=PIN_FAN_PWM)
+    fan._set_value(0)
+    print(f"✅ Fan initialized via sysfs (GPIO {PIN_FAN_PWM})")
+except Exception as e:
+    print(f"⚠️  Fan init failed: {e}")
+    class DummyFan:
+        value = 0
+    fan = DummyFan()
 
 # ============================================================================
 # 🖥️ ИНИЦИАЛИЗАЦИЯ ДИСПЛЕЯ
@@ -72,24 +124,8 @@ except Exception as e:
     class DummyDisplay:
         def Init(self): pass
         def clear(self): pass
-        def ShowImage(self, img): print(f"🖼️  Display: {img.size if img else 'None'}")
+        def ShowImage(self, img): pass
     disp = DummyDisplay()
-
-# ============================================================================
-# 💨 ВЕНТИЛЯТОР (ИСПРАВЛЕНО: GPIO 19)
-# ============================================================================
-fan = None
-try:
-    from gpiozero import PWMOutputDevice
-    # 🔧 GPIO 19, частота 10000 Hz (lgpio не поддерживает 25000), active_high=True
-    fan = PWMOutputDevice(PIN_FAN_PWM, frequency=10000, active_high=True)
-    fan.value = 0  # Старт с выключенным
-    print(f"✅ Fan PWM initialized on GPIO {PIN_FAN_PWM} at 10kHz")
-except Exception as e:
-    print(f"⚠️  Fan init failed: {e}")
-    class DummyFan:
-        value = 0
-    fan = DummyFan()
 
 # ============================================================================
 # 🔘 КНОПКИ
@@ -113,7 +149,6 @@ except Exception as e:
 # ============================================================================
 def get_font(size=14, bold=False, custom_path=None, cyrillic=False):
     """Получить шрифт с фоллбэком"""
-    # Для кириллицы используем DejaVu
     if cyrillic:
         for path in [
             f"/usr/share/fonts/truetype/dejavu/DejaVuSans{'-Bold' if bold else ''}.ttf",
@@ -126,14 +161,12 @@ def get_font(size=14, bold=False, custom_path=None, cyrillic=False):
                     continue
         return ImageFont.load_default()
     
-    # Для цифр/латиницы пробуем Baveuse
     if custom_path and os.path.exists(custom_path):
         try:
             return ImageFont.truetype(custom_path, size)
         except:
             pass
     
-    # Фоллбэк на стандартные
     for path in [
         f"/usr/share/fonts/truetype/dejavu/DejaVuSans{'-Bold' if bold else ''}.ttf",
         f"/usr/share/fonts/truetype/liberation/LiberationSans{'-Bold' if bold else ''}.ttf",
@@ -197,7 +230,7 @@ def draw_progress(draw, x, y, w, h, pct, fg, bg):
         draw.rectangle([x, y, x+fw, y+h], fill=fg)
 
 # ============================================================================
-# 🕰️ СПЯЩИЙ РЕЖИМ (Ретро-часы со шрифтом Baveuse)
+# 🕰️ СПЯЩИЙ РЕЖИМ
 # ============================================================================
 def draw_sleep_screen():
     """Ретро-часы: Baveuse font, дата внизу, декор"""
@@ -205,7 +238,6 @@ def draw_sleep_screen():
     draw = ImageDraw.Draw(img)
     now = datetime.now()
     
-    # ─── ВРЕМЯ (шрифт Baveuse, крупно по центру) ─────────────────────────
     time_str = now.strftime("%H:%M")
     font_time = get_font(72, custom_path=BAVEUSE_FONT)
     
@@ -217,7 +249,6 @@ def draw_sleep_screen():
         time_x, time_y = 40, 60
         font_time = get_font(48)
     
-    # Эффект свечения
     for dx in [-2, -1, 0, 1, 2]:
         for dy in [-2, -1, 0, 1, 2]:
             if dx == 0 and dy == 0:
@@ -226,7 +257,6 @@ def draw_sleep_screen():
     
     draw.text((time_x, time_y), time_str, font=font_time, fill=COLOR_TIME)
     
-    # ─── ДАТА (внизу по ширине) ───────────────────────────────────────────
     date_str = now.strftime("%A, %d %B %Y")
     font_date = get_font(18, custom_path=BAVEUSE_FONT, cyrillic=True)
     
@@ -235,17 +265,9 @@ def draw_sleep_screen():
         date_x = (DISPLAY_WIDTH - bbox[2]) // 2
     except:
         date_x = 10
-        font_date = get_font(14)
-    
-    for dx in [-1, 0, 1]:
-        for dy in [-1, 0, 1]:
-            if dx == 0 and dy == 0:
-                continue
-            draw.text((date_x+dx, DISPLAY_HEIGHT - 30 + dy), date_str, font=font_date, fill=(0, 50, 50))
     
     draw.text((date_x, DISPLAY_HEIGHT - 30), date_str, font=font_date, fill=COLOR_DATE)
     
-    # ─── ДЕКОР (звёзды + сетка) ───────────────────────────────────────────
     seed = now.hour * 100 + now.minute
     for i in range(25):
         sx = (seed + i * 37) % DISPLAY_WIDTH
@@ -254,19 +276,9 @@ def draw_sleep_screen():
         sz = 2 if i % 7 == 0 else 1
         draw.ellipse([sx, sy, sx+sz, sy+sz], fill=(br, br, 220))
     
-    for gx in range(0, DISPLAY_WIDTH, 40):
-        draw.line([(gx, 0), (gx, time_y-10)], fill=(25, 25, 50), width=1)
-    
-    # ─── СТАТУС (углы) ────────────────────────────────────────────────────
     temp = get_cpu_temp()
     tc = COLOR_TIME if temp < 50 else COLOR_WARN if temp < 70 else COLOR_ERROR
     draw.text((8, 5), f"TMP {temp:.0f}C", font=get_font(11), fill=tc)
-    
-    try:
-        dp = psutil.disk_usage('/DATA').percent
-        draw.text((DISPLAY_WIDTH - 70, 5), f"DSK {dp:.0f}%", font=get_font(11), fill=COLOR_TEXT)
-    except:
-        pass
     
     return img
 
@@ -277,7 +289,6 @@ def draw_page_dashboard():
     """Страница 1: Главная"""
     img = Image.new('RGB', (DISPLAY_WIDTH, DISPLAY_HEIGHT), COLOR_BG)
     draw = ImageDraw.Draw(img)
-    
     f_title = get_font(20, custom_path=BAVEUSE_FONT)
     f_normal = get_font(14)
     
@@ -302,7 +313,6 @@ def draw_page_dashboard():
         tx = (DISPLAY_WIDTH - bbox[2]) // 2
     except:
         tx = 70
-        f_big = get_font(24)
     draw.text((tx, 105), ts, font=f_big, fill=COLOR_TIME)
     
     fs = "ON" if fan and fan.value > 0 else "OFF"
@@ -317,7 +327,6 @@ def draw_page_storage():
     """Страница 2: Диски"""
     img = Image.new('RGB', (DISPLAY_WIDTH, DISPLAY_HEIGHT), COLOR_BG)
     draw = ImageDraw.Draw(img)
-    
     f_title = get_font(18, custom_path=BAVEUSE_FONT)
     f_normal = get_font(13)
     
@@ -340,7 +349,6 @@ def draw_page_mergerfs():
     """Страница 3: MergerFS /DATA"""
     img = Image.new('RGB', (DISPLAY_WIDTH, DISPLAY_HEIGHT), COLOR_BG)
     draw = ImageDraw.Draw(img)
-    
     f_title = get_font(20, custom_path=BAVEUSE_FONT)
     f_normal = get_font(14)
     
@@ -364,7 +372,6 @@ def draw_page_system():
     """Страница 4: Ресурсы"""
     img = Image.new('RGB', (DISPLAY_WIDTH, DISPLAY_HEIGHT), COLOR_BG)
     draw = ImageDraw.Draw(img)
-    
     f_title = get_font(18, custom_path=BAVEUSE_FONT)
     f_normal = get_font(13)
     
@@ -386,7 +393,6 @@ def draw_page_info():
     """Страница 5: Инфо"""
     img = Image.new('RGB', (DISPLAY_WIDTH, DISPLAY_HEIGHT), COLOR_BG)
     draw = ImageDraw.Draw(img)
-    
     f_title = get_font(18, custom_path=BAVEUSE_FONT)
     f_normal = get_font(12)
     
@@ -424,7 +430,6 @@ def update_display():
     
     img = draw_sleep_screen() if not display_on else pages[current_page]()
     
-    # Поворот изображения
     if DISPLAY_ROTATION != 0:
         img = img.rotate(DISPLAY_ROTATION, expand=True)
     
@@ -459,22 +464,19 @@ def shutdown_system():
     print("🔌 Shutdown requested...")
     if DISPLAY_AVAILABLE:
         disp.clear()
-    import os
     os.system("sudo shutdown -h now")
 
 def control_fan():
-    """Управление вентилятором (GPIO 19, non-inverted PWM)"""
-    if not fan:
+    """Управление вентилятором через sysfs"""
+    if not fan or not hasattr(fan, '_set_value'):
         return
     
     t = get_cpu_temp()
     
-    if t < FAN_TEMP_THRESHOLD:
-        fan.value = 0  # Выключен
+    if t >= FAN_TEMP_THRESHOLD:
+        fan._set_value(1)  # ВКЛ
     else:
-        # Плавное увеличение скорости выше порога
-        speed = min(FAN_MAX_SPEED, 0.3 + (t - FAN_TEMP_THRESHOLD) * 0.05)
-        fan.value = speed  # Без инверсии для GPIO 19
+        fan._set_value(0)  # ВЫКЛ
 
 def check_sleep():
     """Проверка таймаута сна"""
@@ -495,12 +497,27 @@ except:
     pass
 
 # ============================================================================
+# 🧹 ОЧИСТКА ПРИ ВЫХОДЕ
+# ============================================================================
+import atexit
+
+def cleanup():
+    """Освободить ресурсы при завершении"""
+    print("🧹 Cleaning up...")
+    if fan:
+        fan.close()
+    if disp and hasattr(disp, 'module_exit'):
+        disp.module_exit()
+
+atexit.register(cleanup)
+
+# ============================================================================
 # 🚀 ГЛАВНЫЙ ЦИКЛ
 # ============================================================================
 def main():
     print("🖥️  mbcloud Display Controller starting...")
     print(f"📁 Font: {BAVEUSE_FONT} | Exists: {os.path.exists(BAVEUSE_FONT)}")
-    print(f"🌬️  Fan: GPIO {PIN_FAN_PWM} @ 10kHz")
+    print(f"🌬️  Fan: GPIO {PIN_FAN_PWM} (sysfs)")
     
     threading.Thread(target=check_sleep, daemon=True).start()
     update_display()
@@ -514,8 +531,7 @@ def main():
             time.sleep(0.1)
     except KeyboardInterrupt:
         print("\n👋 Shutting down...")
-        if fan:
-            fan.value = 0
+        cleanup()
         if DISPLAY_AVAILABLE:
             disp.clear()
 
