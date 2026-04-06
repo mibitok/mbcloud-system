@@ -1,0 +1,12 @@
+# mbcloud NAS - дополнения к /boot/firmware/config.txt
+# Добавляются автоматически скриптом setup-mbcloud.sh
+
+dtparam=spi=on
+dtparam=i2c_arm=on
+dtparam=audio=off
+
+# RTC PCF85063a для CM4-NAS-Double-Deck
+dtoverlay=i2c-rtc,pcf85063a
+
+# Опционально: увеличить частоту SPI для дисплея
+dtparam=spi_speed=40000000
