@@ -55,31 +55,47 @@ check_python_syntax() {
         log_warn "main.py: файл не найден, пробуем скачать..."
         local tmp_file="/tmp/mbcloud_main.py.$$"
         
-        if curl -sSL --connect-timeout 10 --max-time 30 -o "$tmp_file" "$MAIN_PY_URL" 2>/dev/null; then
-            if [ -s "$tmp_file" ] && python3 -m py_compile "$tmp_file" 2>/dev/null; then
-                sudo mkdir -p "$(dirname "$main_py")"
-                sudo cp "$tmp_file" "$main_py"
-                sudo chown "$USER:$USER" "$main_py"
-                sudo chmod 644 "$main_py"
-                rm -f "$tmp_file"
-                log_ok "main.py: скачан и проверен"
-                return 0
+        # 🔍 Скачиваем БЕЗ 2>/dev/null для отладки + проверяем content-type
+        log "Скачиваем: $MAIN_PY_URL"
+        if curl -sSL --connect-timeout 10 --max-time 30 -w "\n%{http_code}" -o "$tmp_file" "$MAIN_PY_URL" 2>&1 | tee /tmp/curl_debug.log; then
+            HTTP_CODE=$(tail -1 /tmp/curl_debug.log)
+            if [ "$HTTP_CODE" = "200" ] && [ -s "$tmp_file" ]; then
+                # Проверяем, что это действительно Python-код
+                if head -1 "$tmp_file" | grep -q "^#!.*python"; then
+                    sudo mkdir -p "$(dirname "$main_py")"
+                    sudo cp "$tmp_file" "$main_py"
+                    sudo chown "$USER:$USER" "$main_py"
+                    sudo chmod 644 "$main_py"
+                    rm -f "$tmp_file" /tmp/curl_debug.log
+                    log_ok "main.py: скачан и проверен"
+                    return 0
+                else
+                    log_err "main.py: скачан, но это не Python-файл"
+                    log "Первые строки: $(head -3 "$tmp_file")"
+                    rm -f "$tmp_file" /tmp/curl_debug.log
+                    return 1
+                fi
             else
-                log_err "main.py: скачан, но ошибка синтаксиса"
-                rm -f "$tmp_file"; return 1
+                log_err "main.py: HTTP $HTTP_CODE или пустой файл"
+                cat /tmp/curl_debug.log
+                rm -f "$tmp_file" /tmp/curl_debug.log
+                return 1
             fi
         else
-            log_err "main.py: не удалось скачать"
-            rm -f "$tmp_file" 2>/dev/null
-            log "Ручная загрузка: curl -sSL $MAIN_PY_URL | sudo tee $main_py > /dev/null"
+            log_err "main.py: curl failed"
+            cat /tmp/curl_debug.log
+            rm -f "$tmp_file" /tmp/curl_debug.log 2>/dev/null
             return 1
         fi
     fi
     
-    if python3 -m py_compile "$main_py" 2>/dev/null; then
-        log_ok "main.py: синтаксис верный"; return 0
+    # Файл есть — проверяем синтаксис
+    if python3 -m py_compile "$main_py" 2>&1; then
+        log_ok "main.py: синтаксис верный"
+        return 0
     else
-        log_err "main.py: ошибка синтаксиса"; return 1
+        log_err "main.py: ошибка синтаксиса"
+        return 1
     fi
 }
 
