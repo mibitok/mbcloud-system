@@ -384,3 +384,101 @@ main() {
 
 [[ "${1:-}" == "--check" || "${1:-}" == "-c" ]] && { run_all_checks; exit $?; }
 main "$@"
+
+#===============================================================================
+# 🐳 ОПЦИОНАЛЬНАЯ УСТАНОВКА DOCKER + IMMICH
+#===============================================================================
+
+install_docker_immich() {
+    header "🐳 Установка Docker и Immich (опционально)"
+    
+    echo -e "${CYAN}Immich — это само-хостимый сервис для синхронизации фото (как Google Photos).${NC}"
+    echo -e "${YELLOW}Требования:${NC}"
+    echo "  • Минимум 2 ГБ свободной памяти"
+    echo "  • Минимум 10 ГБ свободного места на /DATA"
+    echo "  • ~2-3 ГБ для загрузки образов при первом запуске"
+    echo ""
+    
+    read -p "Установить Docker и Immich? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_warn "Пропускаем установку Docker/Immich"
+        log "Вы всегда можете установить позже: cd ~/mbcloud-system/docker && docker compose up -d"
+        return 0
+    fi
+    
+    log "Начинаем установку Docker..."
+    
+    # 1. Устанавливаем Docker официальным способом
+    if ! command -v docker &>/dev/null; then
+        log "Скачиваем и запускаем установщик Docker..."
+        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh 2>/dev/null && \
+        sudo sh /tmp/get-docker.sh 2>/dev/null && \
+        log_ok "Docker установлен" || \
+        { log_warn "Не удалось установить Docker через get.docker.com, пробуем apt..."; \
+          sudo apt install -y -qq docker.io docker-compose-plugin 2>/dev/null || \
+          log_err "Не удалось установить Docker"; return 1; }
+        rm -f /tmp/get-docker.sh
+    else
+        log_ok "Docker уже установлен"
+    fi
+    
+    # 2. Добавляем пользователя в группу docker
+    if ! groups "$USER" | grep -q docker; then
+        sudo usermod -aG docker "$USER"
+        log "Пользователь $USER добавлен в группу docker (требуется перезагрузка или 'newgrp docker')"
+    fi
+    
+    # 3. Устанавливаем плагин Compose (если нет)
+    if ! command -v docker-compose &>/dev/null && ! docker compose version &>/dev/null; then
+        sudo apt install -y -qq docker-compose-plugin 2>/dev/null || log_warn "Docker Compose может быть недоступен"
+    fi
+    
+    # 4. Проверяем место на диске
+    local free_space=$(df -BG /DATA 2>/dev/null | tail -1 | awk '{print $4}' | tr -d 'G')
+    if [ -n "$free_space" ] && [ "$free_space" -lt 10 ]; then
+        log_warn "Мало места на /DATA: ${free_space}GB (рекомендуется минимум 10 ГБ для Immich)"
+        read -p "Продолжить установку? (y/N): " -n 1 -r
+        echo
+        [[ ! $REPLY =~ ^[Yy]$ ]] && { log_warn "Отменено пользователем"; return 0; }
+    fi
+    
+    # 5. Настраиваем Immich
+    log "Настраиваем Immich..."
+    local docker_dir="$REPO_PATH/docker"
+    
+    if [ ! -f "$docker_dir/.env" ] && [ -f "$docker_dir/.env.example" ]; then
+        cp "$docker_dir/.env.example" "$docker_dir/.env"
+        
+        # Генерируем надёжный пароль для БД
+        local db_pass=$(openssl rand -hex 16 2>/dev/null || echo "mbcloud_$(date +%s)_$(openssl rand -hex 4)")
+        sudo sed -i "s/^DB_PASSWORD=.*/DB_PASSWORD=$db_pass/" "$docker_dir/.env"
+        sudo chown "$USER:$USER" "$docker_dir/.env"
+        log_ok "Файл .env создан с надёжным паролем"
+    elif [ ! -f "$docker_dir/.env" ]; then
+        log_warn "Файл .env.example не найден — создайте ~/.mbcloud-system/docker/.env вручную"
+    fi
+    
+    # 6. Запускаем Immich
+    log "Запускаем Immich (это может занять 2-5 минут)..."
+    cd "$docker_dir"
+    
+    if docker compose up -d 2>&1 | tee /tmp/immich_install.log; then
+        log_ok "Immich запущен!"
+        log "🌐 Откройте в браузере: ${BLUE}http://$(hostname -I | awk '{print $1}'):2283${NC}"
+        log "📱 На телефоне: установите приложение Immich и укажите тот же адрес"
+        log "🔐 Первый пользователь = администратор"
+    else
+        log_err "Не удалось запустить Immich"
+        log "Проверьте логи: docker compose logs -f"
+        log "Или попробуйте позже: cd $docker_dir && docker compose up -d"
+    fi
+    
+    # 7. Добавляем алиас для удобства
+    if ! grep -q "alias immich=" ~/.bashrc 2>/dev/null; then
+        echo "alias immich='cd $docker_dir && docker compose'" >> ~/.bashrc
+        log "Добавлен алиас: ${BLUE}immich${NC} (теперь можно: 'immich up -d', 'immich logs', 'immich ps')"
+    fi
+    
+    log_ok "Установка Docker/Immich завершена"
+}
