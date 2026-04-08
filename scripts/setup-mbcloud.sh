@@ -1,10 +1,12 @@
 #!/bin/bash
 #===============================================================================
-# mbcloud NAS - Полный скрипт установки с проверкой компонентов (v2.2)
-# Использование: curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-mbcloud.sh | sudo bash
+# mbcloud NAS - Полный скрипт установки с проверкой и авто-восстановлением (v2.3)
+# Использование:
+#   • Полная установка:  curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-mbcloud.sh | sudo bash
+#   • Только проверка:   curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-mbcloud.sh | sudo bash -s -- --check
 #===============================================================================
 
-set -e
+set -e  # Выход при ошибке
 
 # 🎨 Цвета
 RED='\033[0;31m'
@@ -18,7 +20,17 @@ BOLD='\033[1m'
 # ⚙️ Конфигурация
 REPO_URL="https://github.com/mibitok/mbcloud-system.git"
 REPO_BRANCH="main"
-REPO_PATH="/home/${SUDO_USER:-mibitok}/mbcloud-system"
+# 🔧 Надёжное определение пути к репозиторию
+if [ -n "$SUDO_USER" ] && [ -d "/home/$SUDO_USER/mbcloud-system" ]; then
+    REPO_PATH="/home/$SUDO_USER/mbcloud-system"
+elif [ -d "$HOME/mbcloud-system" ]; then
+    REPO_PATH="$HOME/mbcloud-system"
+elif [ -d "/root/mbcloud-system" ]; then
+    REPO_PATH="/root/mbcloud-system"
+else
+    REPO_PATH="/home/${SUDO_USER:-mibitok}/mbcloud-system"
+fi
+# 🔗 Raw-ссылки для скачивания (НЕ blob!)
 MAIN_PY_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/display/main.py"
 FONT_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/display/fonts/baveuse_0.ttf"
 WAVESHARE_URL="https://files.waveshare.com/wiki/CM4-NAS-Double-Deck/CM4-NAS-Double-Deck_Demo.zip"
@@ -42,30 +54,47 @@ log_check() { echo -e "${CYAN}[→]${NC} $1"; }
 header() {
     echo ""
     echo -e "${GREEN}${BOLD}╔════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}${BOLD}║  mbcloud NAS Setup v2.2            ║${NC}"
+    echo -e "${GREEN}${BOLD}║  mbcloud NAS Setup v2.3            ║${NC}"
     echo -e "${GREEN}${BOLD}╚════════════════════════════════════╝${NC}"
     echo "  $(date '+%Y-%m-%d %H:%M:%S') | User: $USER"
     echo ""
 }
 
 #===============================================================================
-# ✅ ФУНКЦИИ ПРОВЕРКИ КОМПОНЕНТОВ
+# ✅ ФУНКЦИИ ПРОВЕРКИ КОМПОНЕНТОВ (с авто-восстановлением)
 #===============================================================================
 
 check_python_syntax() {
     log_check "Проверка синтаксиса main.py..."
     local main_py="$REPO_PATH/display/main.py"
     
-    if [ -f "$main_py" ]; then
-        if sudo python3 -m py_compile "$main_py" 2>/dev/null; then
-            log_ok "main.py: синтаксис верный"
-            return 0
+    # 🔧 Если файл не найден — пробуем скачать автоматически!
+    if [ ! -f "$main_py" ]; then
+        log_warn "main.py: файл не найден, пробуем скачать..."
+        sudo mkdir -p "$(dirname "$main_py")"
+        
+        if curl -sSL -o "$main_py" "$MAIN_PY_URL" 2>/dev/null; then
+            if sudo python3 -m py_compile "$main_py" 2>/dev/null; then
+                log_ok "main.py: скачан и проверен"
+                sudo chown -R "$USER:$USER" "$(dirname "$main_py")" 2>/dev/null || true
+                return 0
+            else
+                log_err "main.py: скачан, но ошибка синтаксиса"
+                return 1
+            fi
         else
-            log_err "main.py: ошибка синтаксиса"
+            log_err "main.py: не удалось скачать"
+            log "Попробуйте вручную: curl -sSL $MAIN_PY_URL -o $main_py"
             return 1
         fi
+    fi
+    
+    # Файл есть — проверяем синтаксис
+    if sudo python3 -m py_compile "$main_py" 2>/dev/null; then
+        log_ok "main.py: синтаксис верный"
+        return 0
     else
-        log_err "main.py: файл не найден"
+        log_err "main.py: ошибка синтаксиса"
         return 1
     fi
 }
@@ -74,25 +103,46 @@ check_font_file() {
     log_check "Проверка шрифта Baveuse..."
     local font="$REPO_PATH/display/fonts/baveuse_0.ttf"
     
-    if [ -f "$font" ]; then
-        local size=$(stat -c%s "$font" 2>/dev/null || echo 0)
-        if [ "$size" -gt 50000 ]; then
-            log_ok "Шрифт: $size байт (валидный)"
-            
-            # Проверка загрузки через PIL
-            if python3 -c "from PIL import ImageFont; ImageFont.truetype('$font', 24)" 2>/dev/null; then
-                log_ok "Шрифт: загружается через PIL"
-                return 0
+    # 🔧 Если шрифт не найден — пробуем скачать
+    if [ ! -f "$font" ]; then
+        log_warn "Шрифт: не найден, пробуем скачать..."
+        sudo mkdir -p "$(dirname "$font")"
+        
+        if curl -sSL -o "$font" "$FONT_URL" 2>/dev/null; then
+            local size=$(stat -c%s "$font" 2>/dev/null || echo 0)
+            if [ "$size" -gt 50000 ]; then
+                if python3 -c "from PIL import ImageFont; ImageFont.truetype('$font', 24)" 2>/dev/null; then
+                    log_ok "Шрифт: скачан и валиден ($size байт)"
+                    sudo chown -R "$USER:$USER" "$(dirname "$font")" 2>/dev/null || true
+                    return 0
+                else
+                    log_warn "Шрифт: скачан, но не загружается через PIL"
+                    return 1
+                fi
             else
-                log_warn "Шрифт: не загружается через PIL (возможно, повреждён)"
+                log_err "Шрифт: скачан, но слишком мал ($size байт)"
                 return 1
             fi
         else
-            log_err "Шрифт: слишком мал ($size байт)"
+            log_err "Шрифт: не удалось скачать"
+            log "Попробуйте вручную: curl -sSL $FONT_URL -o $font"
+            return 1
+        fi
+    fi
+    
+    # Файл есть — проверяем
+    local size=$(stat -c%s "$font" 2>/dev/null || echo 0)
+    if [ "$size" -gt 50000 ]; then
+        log_ok "Шрифт: $size байт (валидный)"
+        if python3 -c "from PIL import ImageFont; ImageFont.truetype('$font', 24)" 2>/dev/null; then
+            log_ok "Шрифт: загружается через PIL"
+            return 0
+        else
+            log_warn "Шрифт: не загружается через PIL (возможно, повреждён)"
             return 1
         fi
     else
-        log_err "Шрифт: файл не найден"
+        log_err "Шрифт: слишком мал ($size байт)"
         return 1
     fi
 }
@@ -114,7 +164,7 @@ check_systemd_service() {
             return 0
         else
             log_warn "Сервис: не активен (возможно, требуется перезагрузка)"
-            return 0  # Не ошибка, может быть первым запуском
+            return 0
         fi
     else
         log_err "Сервис: файл не найден"
@@ -125,18 +175,14 @@ check_systemd_service() {
 check_gpio_interfaces() {
     log_check "Проверка интерфейсов GPIO..."
     
-    # SPI для дисплея
     if [ -c /dev/spidev0.0 ]; then
         log_ok "SPI: /dev/spidev0.0 доступен"
     else
         log_warn "SPI: /dev/spidev0.0 не найден (проверьте dtparam=spi=on)"
     fi
     
-    # I2C для RTC
     if [ -c /dev/i2c-1 ]; then
         log_ok "I2C: /dev/i2c-1 доступен"
-        
-        # Проверка RTC
         if command -v i2cdetect &>/dev/null; then
             if sudo i2cdetect -y 1 2>/dev/null | grep -qE "51|68"; then
                 log_ok "RTC: обнаружен на шине I2C"
@@ -168,7 +214,7 @@ check_python_packages() {
         return 0
     else
         log_warn "Отсутствуют пакеты: ${missing[*]}"
-        log "Установите: pip3 install --break-system-packages ${missing[*]}"
+        log "Установите: sudo pip3 install --break-system-packages ${missing[*]}"
         return 1
     fi
 }
@@ -181,7 +227,6 @@ check_waveshare_demo() {
     if [ -f "$lcdconfig" ]; then
         log_ok "Демо-код: lcdconfig.py найден"
         
-        # Проверка, что FAN_PIN закомментирован
         if grep -q "^#.*self\.FAN_PIN = self\.gpio_pwm" "$lcdconfig" 2>/dev/null; then
             log_ok "Демо-код: конфликт GPIO 19 исправлен"
             return 0
@@ -191,14 +236,13 @@ check_waveshare_demo() {
         fi
     else
         log_warn "Демо-код: lcdconfig.py не найден"
-        return 0  # Не критично, если пользователь не использует демо
+        return 0
     fi
 }
 
 check_storage() {
     log_check "Проверка хранилища..."
     
-    # Проверка точек монтирования
     for dir in /mnt/disk1 /mnt/disk2 "$DATA_MOUNT"; do
         if [ -d "$dir" ]; then
             log_ok "Хранилище: $dir существует"
@@ -207,7 +251,6 @@ check_storage() {
         fi
     done
     
-    # Проверка прав на /DATA
     if [ -d "$DATA_MOUNT" ]; then
         local owner=$(stat -c%U "$DATA_MOUNT" 2>/dev/null)
         if [ "$owner" = "$USER" ]; then
@@ -217,7 +260,6 @@ check_storage() {
         fi
     fi
     
-    # Проверка MergerFS в fstab
     if sudo grep -q "fuse.mergerfs" /etc/fstab 2>/dev/null; then
         log_ok "MergerFS: настроен в /etc/fstab"
     else
@@ -255,7 +297,7 @@ check_samba() {
 check_docker() {
     log_check "Проверка Docker..."
     
-    if command -v docker &>/dev/null && command -v docker-compose &>/dev/null; then
+    if command -v docker &>/dev/null && (command -v docker-compose &>/dev/null || docker compose version &>/dev/null); then
         log_ok "Docker: установлен"
         
         local compose_file="$REPO_PATH/docker/docker-compose.yml"
@@ -278,7 +320,6 @@ check_network() {
     if [ -n "$ip" ]; then
         log_ok "Сеть: IP адрес $ip"
         
-        # Проверка доступности порта 2283 (если Immich запущен)
         if sudo ss -tlnp 2>/dev/null | grep -q ":2283 "; then
             log_ok "Сеть: порт 2283 (Immich) слушается"
         else
@@ -479,7 +520,6 @@ setup_fonts() {
     if [ ! -s "$REPO_PATH/display/fonts/baveuse_0.ttf" ]; then
         log "Скачиваем шрифт Baveuse..."
         curl -sSL -o "$REPO_PATH/display/fonts/baveuse_0.ttf" "$FONT_URL" 2>/dev/null || \
-        wget -q -O "$REPO_PATH/display/fonts/baveuse_0.ttf" "${FONT_URL/.ttf/.zip}" 2>/dev/null || \
         log_warn "Не удалось скачать шрифт автоматически"
     fi
     
@@ -603,7 +643,6 @@ finalize() {
     echo "  • Место на диске:  ${BLUE}df -h /DATA${NC}"
     echo ""
     
-    # Предложение перезагрузки
     read -p "Перезагрузить систему сейчас? (y/N): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
@@ -618,7 +657,7 @@ finalize() {
 # 🚀 ГЛАВНАЯ ФУНКЦИЯ
 #===============================================================================
 main() {
-    header "mbcloud NAS Auto-Setup v2.2"
+    header "mbcloud NAS Auto-Setup v2.3"
     
     check_prerequisites
     update_system
