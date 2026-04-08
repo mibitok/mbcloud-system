@@ -1,12 +1,19 @@
-# mbcloud NAS - дополнения к /boot/firmware/config.txt
-# Добавляются автоматически скриптом setup-mbcloud.sh
+# ============================================================================
+# mbcloud NAS - Дополнения к /boot/firmware/config.txt
+# Для Waveshare CM4-NAS-Double-Deck
+# ============================================================================
 
+# SPI для дисплея (если не включён)
 dtparam=spi=on
-dtparam=i2c_arm=on
-dtparam=audio=off
 
-# RTC PCF85063a для CM4-NAS-Double-Deck
+# I2C для RTC и датчиков (если не включён)
+dtparam=i2c_arm=on
+
+# RTC PCF85063a для хранения времени при выключении
 dtoverlay=i2c-rtc,pcf85063a
 
-# Опционально: увеличить частоту SPI для дисплея
-dtparam=spi_speed=40000000
+# Отключить аудио для экономии ресурсов (опционально)
+dtparam=audio=off
+
+# Опционально: увеличить частоту SPI для лучшего отклика дисплея
+# dtparam=spi_speed=40000000
