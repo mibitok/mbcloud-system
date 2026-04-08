@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# mbcloud NAS - Полный скрипт установки (v2.4 - fix: download via /tmp/)
+# mbcloud NAS - Полный скрипт установки (v2.5 - универсальная загрузка)
 # Использование:
 #   • Установка:  curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-mbcloud.sh | sudo bash
 #   • Проверка:   curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-mbcloud.sh | sudo bash -s -- --check
@@ -14,6 +14,8 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; CY
 # ⚙️ Конфигурация
 REPO_URL="https://github.com/mibitok/mbcloud-system.git"
 REPO_BRANCH="main"
+
+# 🔧 Надёжное определение пути к репозиторию
 if [ -n "$SUDO_USER" ] && [ -d "/home/$SUDO_USER/mbcloud-system" ]; then
     REPO_PATH="/home/$SUDO_USER/mbcloud-system"
 elif [ -d "$HOME/mbcloud-system" ]; then
@@ -23,6 +25,8 @@ elif [ -d "/root/mbcloud-system" ]; then
 else
     REPO_PATH="/home/${SUDO_USER:-mibitok}/mbcloud-system"
 fi
+
+# 🔗 Raw-ссылки для скачивания (НЕ blob!)
 MAIN_PY_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/display/main.py"
 FONT_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/display/fonts/baveuse_0.ttf"
 WAVESHARE_URL="https://files.waveshare.com/wiki/CM4-NAS-Double-Deck/CM4-NAS-Double-Deck_Demo.zip"
@@ -31,20 +35,63 @@ SERVICE_FILE="/etc/systemd/system/mbcloud-display.service"
 DATA_MOUNT="/DATA"
 USER="${SUDO_USER:-$(whoami)}"
 
-# 📊 Счётчики
+# 📊 Счётчики проверок
 CHECKS_PASSED=0; CHECKS_FAILED=0; CHECKS_SKIPPED=0
 
-# 📢 Вывод
+# 📢 Функции вывода
 log() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_ok() { echo -e "${GREEN}[✓]${NC} $1"; ((CHECKS_PASSED++)); }
 log_warn() { echo -e "${YELLOW}[⚠]${NC} $1"; ((CHECKS_SKIPPED++)); }
 log_err() { echo -e "${RED}[✗]${NC} $1"; ((CHECKS_FAILED++)); }
 log_check() { echo -e "${CYAN}[→]${NC} $1"; }
 
-header() { echo ""; echo -e "${GREEN}${BOLD}╔════════════════════════════════════╗${NC}"; echo -e "${GREEN}${BOLD}║  mbcloud NAS Setup v2.4            ║${NC}"; echo -e "${GREEN}${BOLD}╚════════════════════════════════════╝${NC}"; echo "  $(date '+%Y-%m-%d %H:%M:%S') | User: $USER"; echo ""; }
+header() {
+    echo ""
+    echo -e "${GREEN}${BOLD}╔════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}${BOLD}║  mbcloud NAS Setup v2.5            ║${NC}"
+    echo -e "${GREEN}${BOLD}╚════════════════════════════════════╝${NC}"
+    echo "  $(date '+%Y-%m-%d %H:%M:%S') | User: $USER"
+    echo ""
+}
 
 #===============================================================================
-# ✅ ПРОВЕРКИ (с загрузкой через /tmp/)
+# 🔧 УНИВЕРСАЛЬНАЯ ФУНКЦИЯ СКАЧИВАНИЯ (3 метода + проверка)
+#===============================================================================
+download_file() {
+    local url="$1"
+    local dest="$2"
+    local tmp="/tmp/mbcloud_dl_$$.tmp"
+    local http_code=""
+    
+    # Метод 1: curl с проверкой HTTP кода
+    if command -v curl &>/dev/null; then
+        http_code=$(curl -sSL --connect-timeout 10 --max-time 30 -w "%{http_code}" -o "$tmp" "$url" 2>/dev/null)
+        if [ "$http_code" = "200" ] && [ -s "$tmp" ]; then
+            mv "$tmp" "$dest" 2>/dev/null && return 0
+        fi
+    fi
+    
+    # Метод 2: wget как fallback
+    if command -v wget &>/dev/null; then
+        if wget -q --timeout=30 -O "$tmp" "$url" 2>/dev/null && [ -s "$tmp" ]; then
+            mv "$tmp" "$dest" 2>/dev/null && return 0
+        fi
+    fi
+    
+    # Метод 3: curl + sudo tee (для обхода проблем с правами)
+    if command -v curl &>/dev/null; then
+        if curl -sSL --connect-timeout 10 --max-time 30 "$url" 2>/dev/null | sudo tee "$tmp" > /dev/null && [ -s "$tmp" ]; then
+            sudo mv "$tmp" "$dest" 2>/dev/null && return 0
+        fi
+    fi
+    
+    # Очистка
+    rm -f "$tmp" 2>/dev/null
+    return 1
+}
+
+#===============================================================================
+# ✅ ПРОВЕРКИ КОМПОНЕНТОВ (с авто-восстановлением)
 #===============================================================================
 
 check_python_syntax() {
@@ -53,44 +100,35 @@ check_python_syntax() {
     
     if [ ! -f "$main_py" ]; then
         log_warn "main.py: файл не найден, пробуем скачать..."
-        local tmp_file="/tmp/mbcloud_main.py.$$"
+        local tmp_file="/tmp/mbcloud_main_$$.py"
         
-        # 🔍 Скачиваем БЕЗ 2>/dev/null для отладки + проверяем content-type
-        log "Скачиваем: $MAIN_PY_URL"
-        if curl -sSL --connect-timeout 10 --max-time 30 -w "\n%{http_code}" -o "$tmp_file" "$MAIN_PY_URL" 2>&1 | tee /tmp/curl_debug.log; then
-            HTTP_CODE=$(tail -1 /tmp/curl_debug.log)
-            if [ "$HTTP_CODE" = "200" ] && [ -s "$tmp_file" ]; then
-                # Проверяем, что это действительно Python-код
-                if head -1 "$tmp_file" | grep -q "^#!.*python"; then
+        if download_file "$MAIN_PY_URL" "$tmp_file"; then
+            # Проверяем, что это действительно Python-файл
+            if head -1 "$tmp_file" 2>/dev/null | grep -q "^#!.*python"; then
+                if python3 -m py_compile "$tmp_file" 2>/dev/null; then
                     sudo mkdir -p "$(dirname "$main_py")"
                     sudo cp "$tmp_file" "$main_py"
-                    sudo chown "$USER:$USER" "$main_py"
-                    sudo chmod 644 "$main_py"
-                    rm -f "$tmp_file" /tmp/curl_debug.log
+                    sudo chown "$USER:$USER" "$main_py" 2>/dev/null || true
+                    sudo chmod 644 "$main_py" 2>/dev/null || true
+                    rm -f "$tmp_file"
                     log_ok "main.py: скачан и проверен"
                     return 0
                 else
-                    log_err "main.py: скачан, но это не Python-файл"
-                    log "Первые строки: $(head -3 "$tmp_file")"
-                    rm -f "$tmp_file" /tmp/curl_debug.log
-                    return 1
+                    log_err "main.py: ошибка синтаксиса в скачанном файле"
                 fi
             else
-                log_err "main.py: HTTP $HTTP_CODE или пустой файл"
-                cat /tmp/curl_debug.log
-                rm -f "$tmp_file" /tmp/curl_debug.log
-                return 1
+                log_err "main.py: скачан, но это не Python-файл"
             fi
         else
-            log_err "main.py: curl failed"
-            cat /tmp/curl_debug.log
-            rm -f "$tmp_file" /tmp/curl_debug.log 2>/dev/null
-            return 1
+            log_err "main.py: не удалось скачать (сеть/сервер)"
         fi
+        rm -f "$tmp_file" 2>/dev/null
+        log "Ручная загрузка: curl -sSL $MAIN_PY_URL | sudo tee $main_py > /dev/null"
+        return 1
     fi
     
-    # Файл есть — проверяем синтаксис
-    if python3 -m py_compile "$main_py" 2>&1; then
+    # Файл уже есть — проверяем синтаксис
+    if python3 -m py_compile "$main_py" 2>/dev/null; then
         log_ok "main.py: синтаксис верный"
         return 0
     else
@@ -105,50 +143,53 @@ check_font_file() {
     
     if [ ! -f "$font" ]; then
         log_warn "Шрифт: не найден, пробуем скачать..."
-        local tmp_file="/tmp/mbcloud_font.ttf.$$"
+        local tmp_file="/tmp/mbcloud_font_$$.ttf"
         
-        if curl -sSL --connect-timeout 10 --max-time 30 -o "$tmp_file" "$FONT_URL" 2>/dev/null; then
+        if download_file "$FONT_URL" "$tmp_file"; then
             if [ -s "$tmp_file" ]; then
                 local size=$(stat -c%s "$tmp_file" 2>/dev/null || echo 0)
                 if [ "$size" -gt 50000 ]; then
                     if python3 -c "from PIL import ImageFont; ImageFont.truetype('$tmp_file', 24)" 2>/dev/null; then
                         sudo mkdir -p "$(dirname "$font")"
                         sudo cp "$tmp_file" "$font"
-                        sudo chown "$USER:$USER" "$font"
-                        sudo chmod 644 "$font"
+                        sudo chown "$USER:$USER" "$font" 2>/dev/null || true
+                        sudo chmod 644 "$font" 2>/dev/null || true
                         rm -f "$tmp_file"
-                        log_ok "Шрифт: скачан и валиден ($size байт)"; return 0
+                        log_ok "Шрифт: скачан и валиден ($size байт)"
+                        return 0
                     else
-                        log_warn "Шрифт: скачан, но не загружается через PIL"; rm -f "$tmp_file"; return 1
+                        log_warn "Шрифт: скачан, но не загружается через PIL"
                     fi
                 else
-                    log_err "Шрифт: скачан, но слишком мал ($size байт)"; rm -f "$tmp_file"; return 1
+                    log_err "Шрифт: скачан, но слишком мал ($size байт)"
                 fi
             else
-                log_err "Шрифт: скачан, но пустой"; rm -f "$tmp_file"; return 1
+                log_err "Шрифт: скачан, но пустой"
             fi
         else
             log_err "Шрифт: не удалось скачать"
-            rm -f "$tmp_file" 2>/dev/null
-            log "Ручная загрузка: curl -sSL $FONT_URL | sudo tee $font > /dev/null"
-            return 1
         fi
+        rm -f "$tmp_file" 2>/dev/null
+        log "Ручная загрузка: curl -sSL $FONT_URL | sudo tee $font > /dev/null"
+        return 1
     fi
     
+    # Файл есть — проверяем
     local size=$(stat -c%s "$font" 2>/dev/null || echo 0)
     if [ "$size" -gt 50000 ]; then
         log_ok "Шрифт: $size байт (валидный)"
         if python3 -c "from PIL import ImageFont; ImageFont.truetype('$font', 24)" 2>/dev/null; then
-            log_ok "Шрифт: загружается через PIL"; return 0
+            log_ok "Шрифт: загружается через PIL"
+            return 0
         else
-            log_warn "Шрифт: не загружается через PIL"; return 1
+            log_warn "Шрифт: не загружается через PIL"
+            return 1
         fi
     else
-        log_err "Шрифт: слишком мал ($size байт)"; return 1
+        log_err "Шрифт: слишком мал ($size байт)"
+        return 1
     fi
 }
-
-# ... [остальные функции проверок без изменений: check_systemd_service, check_gpio_interfaces, etc.] ...
 
 check_systemd_service() {
     log_check "Проверка systemd сервиса..."
@@ -243,7 +284,7 @@ run_all_checks() {
 }
 
 #===============================================================================
-# 🔧 УСТАНОВКА
+# 🔧 ФУНКЦИИ УСТАНОВКИ
 #===============================================================================
 
 check_prerequisites() {
@@ -305,12 +346,12 @@ clone_repository() {
 
 download_main_py() {
     header "Скачивание main.py с GitHub"
-    local tmp_file="/tmp/mbcloud_main.py.$$"
-    if curl -sSL --connect-timeout 10 --max-time 30 -o "$tmp_file" "$MAIN_PY_URL" 2>/dev/null && [ -s "$tmp_file" ]; then
+    local tmp_file="/tmp/mbcloud_main_$$.py"
+    if download_file "$MAIN_PY_URL" "$tmp_file" && [ -s "$tmp_file" ]; then
         sudo mkdir -p "$REPO_PATH/display"
         sudo cp "$tmp_file" "$REPO_PATH/display/main.py"
-        sudo chown "$USER:$USER" "$REPO_PATH/display/main.py"
-        sudo chmod 644 "$REPO_PATH/display/main.py"
+        sudo chown "$USER:$USER" "$REPO_PATH/display/main.py" 2>/dev/null || true
+        sudo chmod 644 "$REPO_PATH/display/main.py" 2>/dev/null || true
         rm -f "$tmp_file"
         python3 -m py_compile "$REPO_PATH/display/main.py" 2>/dev/null && log_ok "main.py скачан и проверен" || { log_err "Ошибка синтаксиса"; return 1; }
     else
@@ -320,14 +361,14 @@ download_main_py() {
 
 setup_fonts() {
     header "Настройка шрифтов"
-    local tmp_file="/tmp/mbcloud_font.ttf.$$"
+    local tmp_file="/tmp/mbcloud_font_$$.ttf"
     sudo mkdir -p "$REPO_PATH/display/fonts"
     if [ ! -s "$REPO_PATH/display/fonts/baveuse_0.ttf" ]; then
         log "Скачиваем шрифт..."
-        if curl -sSL --connect-timeout 10 --max-time 30 -o "$tmp_file" "$FONT_URL" 2>/dev/null && [ -s "$tmp_file" ]; then
+        if download_file "$FONT_URL" "$tmp_file" && [ -s "$tmp_file" ]; then
             sudo cp "$tmp_file" "$REPO_PATH/display/fonts/baveuse_0.ttf"
-            sudo chown "$USER:$USER" "$REPO_PATH/display/fonts/baveuse_0.ttf"
-            sudo chmod 644 "$REPO_PATH/display/fonts/baveuse_0.ttf"
+            sudo chown "$USER:$USER" "$REPO_PATH/display/fonts/baveuse_0.ttf" 2>/dev/null || true
+            sudo chmod 644 "$REPO_PATH/display/fonts/baveuse_0.ttf" 2>/dev/null || true
             rm -f "$tmp_file"
         fi
     fi
@@ -402,7 +443,7 @@ finalize() {
     read -p "Перезагрузить сейчас? (y/N): " -n 1 -r; echo; [[ $REPLY =~ ^[Yy]$ ]] && { log "Перезагрузка..."; sudo reboot; } || log_warn "Не забудьте: ${YELLOW}sudo reboot${NC}"
 }
 
-main() { header "mbcloud NAS Auto-Setup v2.4"; check_prerequisites; update_system; install_packages; configure_boot; download_waveshare_demo; clone_repository; download_main_py; setup_fonts; setup_systemd_service; setup_storage; setup_samba; finalize; }
+main() { header "mbcloud NAS Auto-Setup v2.5"; check_prerequisites; update_system; install_packages; configure_boot; download_waveshare_demo; clone_repository; download_main_py; setup_fonts; setup_systemd_service; setup_storage; setup_samba; finalize; }
 
 [[ "${1:-}" == "--check" || "${1:-}" == "-c" ]] && { run_all_checks; exit $?; }
 main "$@"
