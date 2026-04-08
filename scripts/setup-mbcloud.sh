@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# mbcloud NAS - Финальный скрипт установки (v2.7 - Bookworm Ready)
+# mbcloud NAS - Финальный скрипт установки (v2.8 - config.txt replace + numpy)
 # Использование:
 #   • Установка:  curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-mbcloud.sh | sudo bash
 #   • Проверка:   curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-mbcloud.sh | sudo bash -s -- --check
@@ -13,7 +13,6 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; CY
 REPO_URL="https://github.com/mibitok/mbcloud-system.git"
 REPO_BRANCH="main"
 
-# 🔧 Надёжное определение пути к репозиторию
 if [ -n "$SUDO_USER" ] && [ -d "/home/$SUDO_USER/mbcloud-system" ]; then
     REPO_PATH="/home/$SUDO_USER/mbcloud-system"
 elif [ -d "$HOME/mbcloud-system" ]; then
@@ -24,21 +23,19 @@ else
     REPO_PATH="/home/${SUDO_USER:-mibitok}/mbcloud-system"
 fi
 
-# 🔗 Raw-ссылки для скачивания
+# 🔗 Raw-ссылки
 MAIN_PY_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/display/main.py"
 FONT_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/display/fonts/baveuse_0.ttf"
 SERVICE_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/systemd/mbcloud-display.service"
-CONFIG_ADDITIONS_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/config/config.txt.additions"
+CONFIG_CLEAN_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/config/config.txt.clean"
 WAVESHARE_URL="https://files.waveshare.com/wiki/CM4-NAS-Double-Deck/CM4-NAS-Double-Deck_Demo.zip"
 CONFIG_FILE="/boot/firmware/config.txt"
 SERVICE_FILE="/etc/systemd/system/mbcloud-display.service"
 DATA_MOUNT="/DATA"
 USER="${SUDO_USER:-$(whoami)}"
 
-# 📊 Счётчики проверок
 CHECKS_PASSED=0; CHECKS_FAILED=0; CHECKS_SKIPPED=0
 
-# 📢 Функции вывода
 log() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_ok() { echo -e "${GREEN}[✓]${NC} $1"; ((CHECKS_PASSED++)) || true; }
 log_warn() { echo -e "${YELLOW}[⚠]${NC} $1"; ((CHECKS_SKIPPED++)) || true; }
@@ -48,188 +45,104 @@ log_check() { echo -e "${CYAN}[→]${NC} $1"; }
 header() {
     echo ""
     echo -e "${GREEN}${BOLD}╔════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}${BOLD}║  mbcloud NAS Setup v2.7            ║${NC}"
+    echo -e "${GREEN}${BOLD}║  mbcloud NAS Setup v2.8            ║${NC}"
     echo -e "${GREEN}${BOLD}╚════════════════════════════════════╝${NC}"
     echo "  $(date '+%Y-%m-%d %H:%M:%S') | User: $USER"
     echo ""
 }
 
 #===============================================================================
-# 🔧 УНИВЕРСАЛЬНАЯ ФУНКЦИЯ СКАЧИВАНИЯ (3 метода + проверка)
+# 🔧 УНИВЕРСАЛЬНАЯ ФУНКЦИЯ СКАЧИВАНИЯ
 #===============================================================================
 download_file() {
-    local url="$1"
-    local dest="$2"
-    local tmp="/tmp/mbcloud_dl_$$.tmp"
-    local http_code=""
-    
-    # Метод 1: curl с проверкой HTTP кода
+    local url="$1"; local dest="$2"; local tmp="/tmp/mbcloud_dl_$$.tmp"; local http_code=""
     if command -v curl &>/dev/null; then
         http_code=$(curl -sSL --connect-timeout 10 --max-time 30 -w "%{http_code}" -o "$tmp" "$url" 2>/dev/null)
-        if [ "$http_code" = "200" ] && [ -s "$tmp" ]; then
-            mv "$tmp" "$dest" 2>/dev/null && return 0
-        fi
+        [ "$http_code" = "200" ] && [ -s "$tmp" ] && { mv "$tmp" "$dest" 2>/dev/null && return 0; }
     fi
-    
-    # Метод 2: wget как fallback
     if command -v wget &>/dev/null; then
-        if wget -q --timeout=30 -O "$tmp" "$url" 2>/dev/null && [ -s "$tmp" ]; then
-            mv "$tmp" "$dest" 2>/dev/null && return 0
-        fi
+        wget -q --timeout=30 -O "$tmp" "$url" 2>/dev/null && [ -s "$tmp" ] && { mv "$tmp" "$dest" 2>/dev/null && return 0; }
     fi
-    
-    # Метод 3: curl + sudo tee (для обхода проблем с правами)
     if command -v curl &>/dev/null; then
-        if curl -sSL --connect-timeout 10 --max-time 30 "$url" 2>/dev/null | sudo tee "$tmp" > /dev/null && [ -s "$tmp" ]; then
-            sudo mv "$tmp" "$dest" 2>/dev/null && return 0
-        fi
+        curl -sSL --connect-timeout 10 --max-time 30 "$url" 2>/dev/null | sudo tee "$tmp" > /dev/null && [ -s "$tmp" ] && { sudo mv "$tmp" "$dest" 2>/dev/null && return 0; }
     fi
-    
-    rm -f "$tmp" 2>/dev/null
-    return 1
+    rm -f "$tmp" 2>/dev/null; return 1
 }
 
 #===============================================================================
-# ✅ ПРОВЕРКИ КОМПОНЕНТОВ (с авто-восстановлением)
+# ✅ ПРОВЕРКИ
 #===============================================================================
-
 check_python_syntax() {
     log_check "Проверка синтаксиса main.py..."
     local main_py="$REPO_PATH/display/main.py"
-    
     if [ ! -f "$main_py" ]; then
         log_warn "main.py: файл не найден, пробуем скачать..."
         local tmp_file="/tmp/mbcloud_main_$$.py"
-        
         if download_file "$MAIN_PY_URL" "$tmp_file"; then
-            if head -1 "$tmp_file" 2>/dev/null | grep -q "^#!.*python"; then
-                if python3 -m py_compile "$tmp_file" 2>/dev/null; then
-                    sudo mkdir -p "$(dirname "$main_py")"
-                    sudo cp "$tmp_file" "$main_py"
-                    sudo chown "$USER:$USER" "$main_py" 2>/dev/null || true
-                    sudo chmod 644 "$main_py" 2>/dev/null || true
-                    rm -f "$tmp_file"
-                    log_ok "main.py: скачан и проверен"
-                    return 0
-                else
-                    log_err "main.py: ошибка синтаксиса в скачанном файле"
-                fi
-            else
-                log_err "main.py: скачан, но это не Python-файл"
-            fi
-        else
-            log_err "main.py: не удалось скачать"
-        fi
-        rm -f "$tmp_file" 2>/dev/null
-        return 1
+            if head -1 "$tmp_file" 2>/dev/null | grep -q "^#!.*python" && python3 -m py_compile "$tmp_file" 2>/dev/null; then
+                sudo mkdir -p "$(dirname "$main_py")"; sudo cp "$tmp_file" "$main_py"
+                sudo chown "$USER:$USER" "$main_py" 2>/dev/null || true; sudo chmod 644 "$main_py" 2>/dev/null || true
+                rm -f "$tmp_file"; log_ok "main.py: скачан и проверен"; return 0
+            else log_err "main.py: ошибка в скачанном файле"; fi
+        else log_err "main.py: не удалось скачать"; fi
+        rm -f "$tmp_file" 2>/dev/null; return 1
     fi
-    
-    if python3 -m py_compile "$main_py" 2>/dev/null; then
-        log_ok "main.py: синтаксис верный"
-        return 0
-    else
-        log_err "main.py: ошибка синтаксиса"
-        return 1
-    fi
+    python3 -m py_compile "$main_py" 2>/dev/null && { log_ok "main.py: синтаксис верный"; return 0; } || { log_err "main.py: ошибка синтаксиса"; return 1; }
 }
 
 check_font_file() {
     log_check "Проверка шрифта Baveuse..."
     local font="$REPO_PATH/display/fonts/baveuse_0.ttf"
-    
     if [ ! -f "$font" ]; then
         log_warn "Шрифт: не найден, пробуем скачать..."
         local tmp_file="/tmp/mbcloud_font_$$.ttf"
-        
-        if download_file "$FONT_URL" "$tmp_file"; then
-            if [ -s "$tmp_file" ]; then
-                local size=$(stat -c%s "$tmp_file" 2>/dev/null || echo 0)
-                if [ "$size" -gt 50000 ]; then
-                    if python3 -c "from PIL import ImageFont; ImageFont.truetype('$tmp_file', 24)" 2>/dev/null; then
-                        sudo mkdir -p "$(dirname "$font")"
-                        sudo cp "$tmp_file" "$font"
-                        sudo chown "$USER:$USER" "$font" 2>/dev/null || true
-                        sudo chmod 644 "$font" 2>/dev/null || true
-                        rm -f "$tmp_file"
-                        log_ok "Шрифт: скачан и валиден ($size байт)"
-                        return 0
-                    else
-                        log_warn "Шрифт: скачан, но не загружается через PIL"
-                    fi
-                else
-                    log_err "Шрифт: скачан, но слишком мал ($size байт)"
-                fi
-            else
-                log_err "Шрифт: скачан, но пустой"
-            fi
-        else
-            log_err "Шрифт: не удалось скачать"
-        fi
-        rm -f "$tmp_file" 2>/dev/null
-        return 1
+        if download_file "$FONT_URL" "$tmp_file" && [ -s "$tmp_file" ]; then
+            local size=$(stat -c%s "$tmp_file" 2>/dev/null || echo 0)
+            if [ "$size" -gt 50000 ] && python3 -c "from PIL import ImageFont; ImageFont.truetype('$tmp_file', 24)" 2>/dev/null; then
+                sudo mkdir -p "$(dirname "$font")"; sudo cp "$tmp_file" "$font"
+                sudo chown "$USER:$USER" "$font" 2>/dev/null || true; sudo chmod 644 "$font" 2>/dev/null || true
+                rm -f "$tmp_file"; log_ok "Шрифт: скачан и валиден ($size байт)"; return 0
+            else log_warn "Шрифт: проблема с загрузкой через PIL"; fi
+        else log_err "Шрифт: не удалось скачать"; fi
+        rm -f "$tmp_file" 2>/dev/null; return 1
     fi
-    
     local size=$(stat -c%s "$font" 2>/dev/null || echo 0)
     if [ "$size" -gt 50000 ]; then
         log_ok "Шрифт: $size байт (валидный)"
-        if python3 -c "from PIL import ImageFont; ImageFont.truetype('$font', 24)" 2>/dev/null; then
-            log_ok "Шрифт: загружается через PIL"
-            return 0
-        else
-            log_warn "Шрифт: не загружается через PIL"
-            return 1
-        fi
-    else
-        log_err "Шрифт: слишком мал ($size байт)"
-        return 1
-    fi
+        python3 -c "from PIL import ImageFont; ImageFont.truetype('$font', 24)" 2>/dev/null && { log_ok "Шрифт: загружается через PIL"; return 0; } || { log_warn "Шрифт: не загружается через PIL"; return 1; }
+    else log_err "Шрифт: слишком мал"; return 1; fi
 }
 
 check_systemd_service() {
     log_check "Проверка systemd сервиса..."
-    
     if [ ! -f "$SERVICE_FILE" ]; then
         log_warn "Сервис: файл не найден, пробуем скачать..."
         local tmp_service="/tmp/mbcloud_service_$$.service"
-        
         if download_file "$SERVICE_URL" "$tmp_service"; then
             sudo cp "$tmp_service" "$SERVICE_FILE"
-            sudo sed -i "s/User=.*/User=$USER/" "$SERVICE_FILE"
-            sudo sed -i "s|WorkingDirectory=.*|WorkingDirectory=$REPO_PATH/display|" "$SERVICE_FILE"
-            sudo sed -i "s|ExecStart=.*|ExecStart=/usr/bin/python3 $REPO_PATH/display/main.py|" "$SERVICE_FILE"
-            sudo systemctl daemon-reload
-            sudo systemctl enable mbcloud-display.service 2>/dev/null || true
-            rm -f "$tmp_service"
-            log_ok "Сервис: скачан и настроен"
-        else
-            log_err "Сервис: не удалось скачать"
-            return 1
-        fi
+            sudo sed -i "s/User=.*/User=$USER/; s|WorkingDirectory=.*|WorkingDirectory=$REPO_PATH/display|; s|ExecStart=.*|ExecStart=/usr/bin/python3 $REPO_PATH/display/main.py|" "$SERVICE_FILE"
+            sudo systemctl daemon-reload; sudo systemctl enable mbcloud-display.service 2>/dev/null || true
+            rm -f "$tmp_service"; log_ok "Сервис: скачан и настроен"
+        else log_err "Сервис: не удалось скачать"; return 1; fi
     fi
-    
     log_ok "Сервис: файл $SERVICE_FILE существует"
     sudo systemctl is-enabled mbcloud-display.service &>/dev/null && log_ok "Сервис: включён в автозагрузку" || log_warn "Сервис: не включён в автозагрузку"
-    sudo systemctl is-active mbcloud-display.service &>/dev/null && { log_ok "Сервис: активен (running)"; return 0; } || { log_warn "Сервис: не активен"; return 0; }
+    sudo systemctl is-active mbcloud-display.service &>/dev/null && { log_ok "Сервис: активен"; return 0; } || { log_warn "Сервис: не активен"; return 0; }
 }
 
 check_gpio_interfaces() {
     log_check "Проверка интерфейсов GPIO..."
-    [ -c /dev/spidev0.0 ] && log_ok "SPI: /dev/spidev0.0 доступен" || log_warn "SPI: /dev/spidev0.0 не найден (проверьте dtparam=spi=on)"
-    if [ -c /dev/i2c-1 ]; then
-        log_ok "I2C: /dev/i2c-1 доступен"
-        command -v i2cdetect &>/dev/null && { sudo i2cdetect -y 1 2>/dev/null | grep -qE "51|68" && log_ok "RTC: обнаружен" || log_warn "RTC: не обнаружен"; }
-    else
-        log_warn "I2C: /dev/i2c-1 не найден (проверьте dtparam=i2c_arm=on)"
-    fi
+    [ -c /dev/spidev0.0 ] && log_ok "SPI: /dev/spidev0.0 доступен" || log_warn "SPI: /dev/spidev0.0 не найден"
+    [ -c /dev/i2c-1 ] && { log_ok "I2C: /dev/i2c-1 доступен"; command -v i2cdetect &>/dev/null && { sudo i2cdetect -y 1 2>/dev/null | grep -qE "51|68" && log_ok "RTC: обнаружен" || log_warn "RTC: не обнаружен"; }; } || log_warn "I2C: /dev/i2c-1 не найден"
 }
 
 check_python_packages() {
     log_check "Проверка Python-зависимостей..."
     local missing=()
-    for pkg in psutil gpiozero PIL; do
+    for pkg in psutil gpiozero PIL numpy; do
         python3 -c "import $pkg" 2>/dev/null && log_ok "Python: $pkg установлен" || { missing+=("$pkg"); log_warn "Python: $pkg не найден"; }
     done
-    [ ${#missing[@]} -eq 0 ] && return 0 || { log_warn "Отсутствуют: ${missing[*]}"; log "Установите: sudo apt install -y python3-psutil python3-gpiozero python3-pil"; return 1; }
+    [ ${#missing[@]} -eq 0 ] && return 0 || { log_warn "Отсутствуют: ${missing[*]}"; log "Установите: sudo apt install -y python3-psutil python3-gpiozero python3-pil python3-numpy"; return 1; }
 }
 
 check_waveshare_demo() {
@@ -239,10 +152,7 @@ check_waveshare_demo() {
         log_ok "Демо-код: lcdconfig.py найден"
         grep -q "^#.*self\.FAN_PIN = self\.gpio_pwm" "$lcdconfig" 2>/dev/null && log_ok "Демо-код: конфликт GPIO 19 исправлен" || log_warn "Демо-код: возможна проблема с GPIO 19"
         return 0
-    else
-        log_warn "Демо-код: lcdconfig.py не найден"
-        return 0
-    fi
+    else log_warn "Демо-код: lcdconfig.py не найден"; return 0; fi
 }
 
 check_storage() {
@@ -261,12 +171,8 @@ check_samba() {
 check_docker() {
     log_check "Проверка Docker..."
     if command -v docker &>/dev/null && (command -v docker-compose &>/dev/null || docker compose version &>/dev/null); then
-        log_ok "Docker: установлен"
-        [ -f "$REPO_PATH/docker/docker-compose.yml" ] && log_ok "Docker: docker-compose.yml найден" || log_warn "Docker: docker-compose.yml не найден"
-        return 0
-    else
-        log_warn "Docker: не установлен (опционально)"; return 0
-    fi
+        log_ok "Docker: установлен"; [ -f "$REPO_PATH/docker/docker-compose.yml" ] && log_ok "Docker: docker-compose.yml найден" || log_warn "Docker: docker-compose.yml не найден"; return 0
+    else log_warn "Docker: не установлен (опционально)"; return 0; fi
 }
 
 check_network() {
@@ -276,55 +182,21 @@ check_network() {
         log_ok "Сеть: IP адрес $ip"
         sudo ss -tlnp 2>/dev/null | grep -q ":2283 " && log_ok "Сеть: порт 2283 слушается" || log_warn "Сеть: порт 2283 не слушается"
         return 0
-    else
-        log_warn "Сеть: не удалось определить IP"; return 1
-    fi
+    else log_warn "Сеть: не удалось определить IP"; return 1; fi
 }
 
 print_verification_summary() {
-    echo ""
-    echo -e "${CYAN}${BOLD}═══════════════════════════════════════${NC}"
-    echo -e "${CYAN}${BOLD}  ПРОВЕРКА УСТАНОВКИ${NC}"
-    echo -e "${CYAN}${BOLD}═══════════════════════════════════════${NC}"
-    echo ""
-    echo -e "${BOLD}Результаты:${NC}"
-    echo -e "  ${GREEN}✓ Прошло:${NC}     $CHECKS_PASSED"
-    echo -e "  ${YELLOW}⚠ Предупреждения:${NC} $CHECKS_SKIPPED"
-    echo -e "  ${RED}✗ Ошибки:${NC}      $CHECKS_FAILED"
-    echo ""
-    if [ $CHECKS_FAILED -eq 0 ]; then
-        echo -e "${GREEN}${BOLD}🎉 ВСЕ КРИТИЧЕСКИЕ ПРОВЕРКИ ПРОЙДЕНЫ!${NC}"
-        echo "Система готова к использованию."
-    else
-        echo -e "${RED}${BOLD}⚠ ЕСТЬ ОШИБКИ${NC}"
-        echo "Исправьте $CHECKS_FAILED ошибок для полной работоспособности."
-    fi
-    echo ""
-    echo -e "${BOLD}Полезные команды:${NC}"
-    echo -e "  • Перезапуск: ${BLUE}sudo systemctl restart mbcloud-display.service${NC}"
-    echo -e "  • Логи: ${BLUE}journalctl -u mbcloud-display.service -f${NC}"
-    echo -e "  • Immich: ${BLUE}cd ~/mbcloud-system/docker && docker compose up -d${NC}"
-    echo -e "  • Samba: ${BLUE}sudo smbpasswd -a $USER${NC}"
-    echo -e "  • Reboot: ${BLUE}sudo reboot${NC}"
-    echo ""
+    echo ""; echo -e "${CYAN}${BOLD}═══════════════════════════════════════${NC}"; echo -e "${CYAN}${BOLD}  ПРОВЕРКА УСТАНОВКИ${NC}"; echo -e "${CYAN}${BOLD}═══════════════════════════════════════${NC}"; echo ""
+    echo -e "${BOLD}Результаты:${NC}"; echo -e "  ${GREEN}✓ Прошло:${NC} $CHECKS_PASSED"; echo -e "  ${YELLOW}⚠ Предупреждения:${NC} $CHECKS_SKIPPED"; echo -e "  ${RED}✗ Ошибки:${NC} $CHECKS_FAILED"; echo ""
+    [ $CHECKS_FAILED -eq 0 ] && { echo -e "${GREEN}${BOLD}🎉 ВСЕ КРИТИЧЕСКИЕ ПРОВЕРКИ ПРОЙДЕНЫ!${NC}"; echo "Система готова к использованию."; } || { echo -e "${RED}${BOLD}⚠ ЕСТЬ ОШИБКИ${NC}"; echo "Исправьте $CHECKS_FAILED ошибок."; }
+    echo ""; echo -e "${BOLD}Полезные команды:${NC}"; echo -e "  • Перезапуск: ${BLUE}sudo systemctl restart mbcloud-display.service${NC}"; echo -e "  • Логи: ${BLUE}journalctl -u mbcloud-display.service -f${NC}"; echo -e "  • Immich: ${BLUE}cd ~/mbcloud-system/docker && docker compose up -d${NC}"; echo -e "  • Samba: ${BLUE}sudo smbpasswd -a $USER${NC}"; echo -e "  • Reboot: ${BLUE}sudo reboot${NC}"; echo ""
 }
 
 run_all_checks() {
     header "Проверка установленных компонентов"
-    
-    check_python_syntax || true
-    check_font_file || true
-    check_systemd_service || true
-    check_gpio_interfaces || true
-    check_python_packages || true
-    check_waveshare_demo || true
-    check_storage || true
-    check_samba || true
-    check_docker || true
-    check_network || true
-    
-    print_verification_summary
-    return $CHECKS_FAILED
+    check_python_syntax || true; check_font_file || true; check_systemd_service || true; check_gpio_interfaces || true
+    check_python_packages || true; check_waveshare_demo || true; check_storage || true; check_samba || true; check_docker || true; check_network || true
+    print_verification_summary; return $CHECKS_FAILED
 }
 
 #===============================================================================
@@ -342,60 +214,46 @@ update_system() { header "Обновление системы"; log "Обнов�
 
 install_packages() {
     header "Установка зависимостей"
-    
     log "Устанавливаем базовые пакеты..."
     sudo apt install -y -qq git curl wget unzip htop tmux python3-pip python3-venv mergerfs smartmontools samba i2c-tools read-edid fonts-dejavu-core libatlas-base-dev libopenjp2-7 libtiff5 2>/dev/null || log_warn "Некоторые пакеты могли не установиться"
     
-    log "Устанавливаем Python-зависимости (надёжный способ для Bookworm)..."
-    # 🔧 Сначала пробуем apt (стабильно), затем pip как fallback
-    sudo apt install -y -qq python3-psutil python3-gpiozero python3-pil 2>/dev/null || \
-    sudo pip3 install -q --break-system-packages psutil gpiozero Pillow 2>/dev/null || \
+    log "Устанавливаем Python-зависимости (включая numpy для дисплея)..."
+    sudo apt install -y -qq python3-psutil python3-gpiozero python3-pil python3-numpy 2>/dev/null || \
+    sudo pip3 install -q --break-system-packages psutil gpiozero Pillow numpy 2>/dev/null || \
     log_warn "Некоторые Python-пакеты могли не установиться"
-    
     log_ok "Зависимости установлены"
 }
 
 configure_boot() {
     header "Настройка /boot/firmware/config.txt"
     
-    # Определяем правильный путь к config.txt
     [ ! -f "$CONFIG_FILE" ] && CONFIG_FILE="/boot/config.txt"
     
-    # Создаём резервную копию
+    # 🔧 РЕЗЕРВНАЯ КОПИЯ
     sudo cp "$CONFIG_FILE" "${CONFIG_FILE}.backup.$(date +%Y%m%d%H%M)" 2>/dev/null || true
+    log "Резервная копия: ${CONFIG_FILE}.backup.*"
     
-    # 🔧 Умное обновление: проверяем каждую настройку и добавляем только если нет
-    log "Проверяем настройки SPI/I2C/RTC..."
+    # 🔧 СКАЧИВАЕМ И ЗАМЕНЯЕМ ПОЛНОСТЬЮ
+    log "Скачиваем чистый config.txt с GitHub..."
+    local tmp_config="/tmp/mbcloud_config_$$.txt"
     
-    # SPI
-    if ! sudo grep -q "^dtparam=spi=on" "$CONFIG_FILE" 2>/dev/null; then
-        sudo bash -c "echo 'dtparam=spi=on' >> '$CONFIG_FILE'"
-        log "  + Добавлено: dtparam=spi=on"
+    if download_file "$CONFIG_CLEAN_URL" "$tmp_config"; then
+        # Заменяем файл полностью
+        sudo cp "$tmp_config" "$CONFIG_FILE"
+        sudo chown root:root "$CONFIG_FILE"
+        sudo chmod 644 "$CONFIG_FILE"
+        rm -f "$tmp_config"
+        log_ok "config.txt заменён на чистую версию"
+        log "⚠️  Требуется перезагрузка для применения изменений!"
+    else
+        log_warn "Не удалось скачать config.txt.clean, пробуем умное добавление..."
+        # Fallback: добавляем только недостающее (старый метод)
+        sudo bash -c "grep -q '^dtparam=spi=on' '$CONFIG_FILE' || echo 'dtparam=spi=on' >> '$CONFIG_FILE'"
+        sudo bash -c "grep -q '^dtparam=i2c_arm=on' '$CONFIG_FILE' || echo 'dtparam=i2c_arm=on' >> '$CONFIG_FILE'"
+        sudo bash -c "grep -q 'dtoverlay=i2c-rtc,pcf85063a' '$CONFIG_FILE' || echo 'dtoverlay=i2c-rtc,pcf85063a' >> '$CONFIG_FILE'"
+        sudo sed -i 's/^dtparam=audio=on/dtparam=audio=off/' "$CONFIG_FILE" 2>/dev/null || true
+        log_ok "Настройки добавлены (fallback)"
     fi
-    
-    # I2C
-    if ! sudo grep -q "^dtparam=i2c_arm=on" "$CONFIG_FILE" 2>/dev/null; then
-        sudo bash -c "echo 'dtparam=i2c_arm=on' >> '$CONFIG_FILE'"
-        log "  + Добавлено: dtparam=i2c_arm=on"
-    fi
-    
-    # RTC
-    if ! sudo grep -q "dtoverlay=i2c-rtc,pcf85063a" "$CONFIG_FILE" 2>/dev/null; then
-        sudo bash -c "echo 'dtoverlay=i2c-rtc,pcf85063a' >> '$CONFIG_FILE'"
-        log "  + Добавлено: dtoverlay=i2c-rtc,pcf85063a"
-    fi
-    
-    # Audio off (опционально, но рекомендуется для экономии ресурсов)
-    # Заменяем audio=on на audio=off если есть, или добавляем если нет
-    if sudo grep -q "^dtparam=audio=on" "$CONFIG_FILE" 2>/dev/null; then
-        sudo sed -i 's/^dtparam=audio=on/dtparam=audio=off/' "$CONFIG_FILE"
-        log "  ~ Заменено: dtparam=audio=on → audio=off"
-    elif ! sudo grep -q "^dtparam=audio=off" "$CONFIG_FILE" 2>/dev/null; then
-        sudo bash -c "echo 'dtparam=audio=off' >> '$CONFIG_FILE'"
-        log "  + Добавлено: dtparam=audio=off"
-    fi
-    
-    log_ok "Конфигурация обновлена (требуется перезагрузка)"
 }
 
 download_waveshare_demo() {
@@ -403,9 +261,7 @@ download_waveshare_demo() {
     cd /home/$USER
     if [ ! -d "CM4-NAS-Double-Deck_Demo" ]; then
         log "Скачиваем демо-код..."; wget -q -O demo.zip "$WAVESHARE_URL"; unzip -q demo.zip; rm -f demo.zip; log_ok "Демо-код скачан"
-    else
-        log_ok "Демо-код уже присутствует"
-    fi
+    else log_ok "Демо-код уже присутствует"; fi
     local lcdconfig="/home/$USER/CM4-NAS-Double-Deck_Demo/RaspberryPi/lib/lcdconfig.py"
     if [ -f "$lcdconfig" ]; then
         log "Исправляем конфликт GPIO 19..."
@@ -430,15 +286,11 @@ download_main_py() {
     header "Скачивание main.py с GitHub"
     local tmp_file="/tmp/mbcloud_main_$$.py"
     if download_file "$MAIN_PY_URL" "$tmp_file" && [ -s "$tmp_file" ]; then
-        sudo mkdir -p "$REPO_PATH/display"
-        sudo cp "$tmp_file" "$REPO_PATH/display/main.py"
-        sudo chown "$USER:$USER" "$REPO_PATH/display/main.py" 2>/dev/null || true
-        sudo chmod 644 "$REPO_PATH/display/main.py" 2>/dev/null || true
+        sudo mkdir -p "$REPO_PATH/display"; sudo cp "$tmp_file" "$REPO_PATH/display/main.py"
+        sudo chown "$USER:$USER" "$REPO_PATH/display/main.py" 2>/dev/null || true; sudo chmod 644 "$REPO_PATH/display/main.py" 2>/dev/null || true
         rm -f "$tmp_file"
         python3 -m py_compile "$REPO_PATH/display/main.py" 2>/dev/null && log_ok "main.py скачан и проверен" || { log_err "Ошибка синтаксиса"; return 1; }
-    else
-        log_err "Не удалось скачать main.py"; rm -f "$tmp_file" 2>/dev/null; return 1
-    fi
+    else log_err "Не удалось скачать main.py"; rm -f "$tmp_file" 2>/dev/null; return 1; fi
 }
 
 setup_fonts() {
@@ -449,37 +301,26 @@ setup_fonts() {
         log "Скачиваем шрифт..."
         if download_file "$FONT_URL" "$tmp_file" && [ -s "$tmp_file" ]; then
             sudo cp "$tmp_file" "$REPO_PATH/display/fonts/baveuse_0.ttf"
-            sudo chown "$USER:$USER" "$REPO_PATH/display/fonts/baveuse_0.ttf" 2>/dev/null || true
-            sudo chmod 644 "$REPO_PATH/display/fonts/baveuse_0.ttf" 2>/dev/null || true
+            sudo chown "$USER:$USER" "$REPO_PATH/display/fonts/baveuse_0.ttf" 2>/dev/null || true; sudo chmod 644 "$REPO_PATH/display/fonts/baveuse_0.ttf" 2>/dev/null || true
             rm -f "$tmp_file"
         fi
     fi
     if [ -s "$REPO_PATH/display/fonts/baveuse_0.ttf" ]; then
         local size=$(sudo stat -c%s "$REPO_PATH/display/fonts/baveuse_0.ttf" 2>/dev/null || echo 0)
         log_ok "Шрифт установлен: $size байт"
-    else
-        log_warn "Шрифт не установлен"
-    fi
+    else log_warn "Шрифт не установлен"; fi
     sudo chown -R "$USER:$USER" "$REPO_PATH/display/fonts" 2>/dev/null || true
 }
 
 setup_systemd_service() {
     header "Настройка systemd сервиса"
     local tmp_service="/tmp/mbcloud_service_$$.service"
-    
     if download_file "$SERVICE_URL" "$tmp_service"; then
         sudo cp "$tmp_service" "$SERVICE_FILE"
-        sudo sed -i "s/User=.*/User=$USER/" "$SERVICE_FILE"
-        sudo sed -i "s|WorkingDirectory=.*|WorkingDirectory=$REPO_PATH/display|" "$SERVICE_FILE"
-        sudo sed -i "s|ExecStart=.*|ExecStart=/usr/bin/python3 $REPO_PATH/display/main.py|" "$SERVICE_FILE"
-        sudo systemctl daemon-reload
-        sudo systemctl enable mbcloud-display.service 2>/dev/null || true
-        rm -f "$tmp_service"
-        log_ok "Сервис настроен и включён в автозагрузку"
-    else
-        log_err "Не удалось скачать mbcloud-display.service"
-        return 1
-    fi
+        sudo sed -i "s/User=.*/User=$USER/; s|WorkingDirectory=.*|WorkingDirectory=$REPO_PATH/display|; s|ExecStart=.*|ExecStart=/usr/bin/python3 $REPO_PATH/display/main.py|" "$SERVICE_FILE"
+        sudo systemctl daemon-reload; sudo systemctl enable mbcloud-display.service 2>/dev/null || true
+        rm -f "$tmp_service"; log_ok "Сервис настроен и включён в автозагрузку"
+    else log_err "Не удалось скачать mbcloud-display.service"; return 1; fi
 }
 
 setup_storage() {
@@ -507,9 +348,7 @@ setup_samba() {
 EOF
 "
         log_ok "Samba share добавлен"; sudo systemctl restart smbd 2>/dev/null || true; sudo systemctl enable smbd 2>/dev/null || true
-    else
-        log_ok "Samba share уже настроен"
-    fi
+    else log_ok "Samba share уже настроен"; fi
     log "Задайте пароль: sudo smbpasswd -a $USER"
 }
 
@@ -522,7 +361,7 @@ finalize() {
     echo -e "${GREEN}${BOLD}═══════════════════════════════════════${NC}"
     echo ""
     echo -e "${GREEN}Следующие шаги:${NC}"
-    echo -e "  1. Перезагрузка: ${YELLOW}sudo reboot${NC} (ОБЯЗАТЕЛЬНО для применения config.txt!)"
+    echo -e "  1. ${RED}ПЕРЕЗАГРУЗКА ОБЯЗАТЕЛЬНА${NC}: ${YELLOW}sudo reboot${NC} (для применения config.txt!)"
     echo -e "  2. Immich: ${YELLOW}cd ~/mbcloud-system/docker && docker compose up -d${NC}"
     echo -e "  3. Samba: ${YELLOW}sudo smbpasswd -a $USER${NC}"
     echo -e "  4. iPhone: ${YELLOW}http://$(hostname -I | awk '{print $1}'):2283${NC}"
@@ -532,27 +371,15 @@ finalize() {
     echo -e "  • Логи: ${BLUE}journalctl -u mbcloud-display.service -f${NC}"
     echo -e "  • Temp: ${BLUE}vcgencmd measure_temp${NC}"
     echo ""
-    read -p "Перезагрузить сейчас? (y/N): " -n 1 -r; echo
-    [[ $REPLY =~ ^[Yy]$ ]] && { log "Перезагрузка..."; sudo reboot; } || log_warn "Не забудьте: ${YELLOW}sudo reboot${NC} (для SPI/I2C/RTC)!"
+    read -p "Перезагрузить СЕЙЧАС? (y/N): " -n 1 -r; echo
+    [[ $REPLY =~ ^[Yy]$ ]] && { log "Перезагрузка..."; sudo reboot; } || { log_warn "⚠️  НЕ ЗАБУДЬТЕ: ${YELLOW}sudo reboot${NC} (иначе SPI/I2C не заработают)!"; }
 }
 
-#===============================================================================
-# 🚀 ГЛАВНАЯ ФУНКЦИЯ
-#===============================================================================
 main() {
-    header "mbcloud NAS Auto-Setup v2.7"
-    check_prerequisites
-    update_system
-    install_packages
-    configure_boot
-    download_waveshare_demo
-    clone_repository
-    download_main_py
-    setup_fonts
-    setup_systemd_service
-    setup_storage
-    setup_samba
-    finalize
+    header "mbcloud NAS Auto-Setup v2.8"
+    check_prerequisites; update_system; install_packages; configure_boot
+    download_waveshare_demo; clone_repository; download_main_py; setup_fonts
+    setup_systemd_service; setup_storage; setup_samba; finalize
 }
 
 [[ "${1:-}" == "--check" || "${1:-}" == "-c" ]] && { run_all_checks; exit $?; }
