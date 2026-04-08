@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# mbcloud NAS - Финальный скрипт установки (v2.8 - config.txt replace + numpy)
+# mbcloud NAS - Финальный скрипт установки (v2.9 - Docker/Immich optional)
 # Использование:
 #   • Установка:  curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-mbcloud.sh | sudo bash
 #   • Проверка:   curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-mbcloud.sh | sudo bash -s -- --check
@@ -13,6 +13,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; CY
 REPO_URL="https://github.com/mibitok/mbcloud-system.git"
 REPO_BRANCH="main"
 
+# 🔧 Надёжное определение пути к репозиторию
 if [ -n "$SUDO_USER" ] && [ -d "/home/$SUDO_USER/mbcloud-system" ]; then
     REPO_PATH="/home/$SUDO_USER/mbcloud-system"
 elif [ -d "$HOME/mbcloud-system" ]; then
@@ -23,7 +24,7 @@ else
     REPO_PATH="/home/${SUDO_USER:-mibitok}/mbcloud-system"
 fi
 
-# 🔗 Raw-ссылки
+# 🔗 Raw-ссылки для скачивания
 MAIN_PY_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/display/main.py"
 FONT_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/display/fonts/baveuse_0.ttf"
 SERVICE_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/systemd/mbcloud-display.service"
@@ -34,8 +35,10 @@ SERVICE_FILE="/etc/systemd/system/mbcloud-display.service"
 DATA_MOUNT="/DATA"
 USER="${SUDO_USER:-$(whoami)}"
 
+# 📊 Счётчики проверок
 CHECKS_PASSED=0; CHECKS_FAILED=0; CHECKS_SKIPPED=0
 
+# 📢 Функции вывода
 log() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_ok() { echo -e "${GREEN}[✓]${NC} $1"; ((CHECKS_PASSED++)) || true; }
 log_warn() { echo -e "${YELLOW}[⚠]${NC} $1"; ((CHECKS_SKIPPED++)) || true; }
@@ -45,24 +48,28 @@ log_check() { echo -e "${CYAN}[→]${NC} $1"; }
 header() {
     echo ""
     echo -e "${GREEN}${BOLD}╔════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}${BOLD}║  mbcloud NAS Setup v2.8            ║${NC}"
+    echo -e "${GREEN}${BOLD}║  mbcloud NAS Setup v2.9            ║${NC}"
     echo -e "${GREEN}${BOLD}╚════════════════════════════════════╝${NC}"
     echo "  $(date '+%Y-%m-%d %H:%M:%S') | User: $USER"
     echo ""
 }
 
 #===============================================================================
-# 🔧 УНИВЕРСАЛЬНАЯ ФУНКЦИЯ СКАЧИВАНИЯ
+# 🔧 УНИВЕРСАЛЬНАЯ ФУНКЦИЯ СКАЧИВАНИЯ (3 метода + проверка)
 #===============================================================================
 download_file() {
     local url="$1"; local dest="$2"; local tmp="/tmp/mbcloud_dl_$$.tmp"; local http_code=""
+    
+    # Метод 1: curl с проверкой HTTP кода
     if command -v curl &>/dev/null; then
         http_code=$(curl -sSL --connect-timeout 10 --max-time 30 -w "%{http_code}" -o "$tmp" "$url" 2>/dev/null)
         [ "$http_code" = "200" ] && [ -s "$tmp" ] && { mv "$tmp" "$dest" 2>/dev/null && return 0; }
     fi
+    # Метод 2: wget как fallback
     if command -v wget &>/dev/null; then
         wget -q --timeout=30 -O "$tmp" "$url" 2>/dev/null && [ -s "$tmp" ] && { mv "$tmp" "$dest" 2>/dev/null && return 0; }
     fi
+    # Метод 3: curl + sudo tee (для обхода проблем с правами)
     if command -v curl &>/dev/null; then
         curl -sSL --connect-timeout 10 --max-time 30 "$url" 2>/dev/null | sudo tee "$tmp" > /dev/null && [ -s "$tmp" ] && { sudo mv "$tmp" "$dest" 2>/dev/null && return 0; }
     fi
@@ -70,11 +77,13 @@ download_file() {
 }
 
 #===============================================================================
-# ✅ ПРОВЕРКИ
+# ✅ ПРОВЕРКИ КОМПОНЕНТОВ (с авто-восстановлением)
 #===============================================================================
+
 check_python_syntax() {
     log_check "Проверка синтаксиса main.py..."
     local main_py="$REPO_PATH/display/main.py"
+    
     if [ ! -f "$main_py" ]; then
         log_warn "main.py: файл не найден, пробуем скачать..."
         local tmp_file="/tmp/mbcloud_main_$$.py"
@@ -93,6 +102,7 @@ check_python_syntax() {
 check_font_file() {
     log_check "Проверка шрифта Baveuse..."
     local font="$REPO_PATH/display/fonts/baveuse_0.ttf"
+    
     if [ ! -f "$font" ]; then
         log_warn "Шрифт: не найден, пробуем скачать..."
         local tmp_file="/tmp/mbcloud_font_$$.ttf"
@@ -200,6 +210,108 @@ run_all_checks() {
 }
 
 #===============================================================================
+# 🐳 ОПЦИОНАЛЬНАЯ УСТАНОВКА DOCKER + IMMICH
+#===============================================================================
+install_docker_immich() {
+    header "🐳 Установка Docker и Immich (опционально)"
+    
+    echo -e "${CYAN}Immich — это само-хостимый сервис для синхронизации фото (как Google Photos).${NC}"
+    echo -e "${YELLOW}Требования:${NC}"
+    echo "  • Минимум 2 ГБ свободной памяти"
+    echo "  • Минимум 10 ГБ свободного места на /DATA"
+    echo "  • ~2-3 ГБ для загрузки образов при первом запуске"
+    echo ""
+    
+    read -p "Установить Docker и Immich? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_warn "Пропускаем установку Docker/Immich"
+        log "Вы всегда можете установить позже: cd ~/mbcloud-system/docker && docker compose up -d"
+        return 0
+    fi
+    
+    log "Начинаем установку Docker..."
+    
+    # 1. Устанавливаем Docker официальным способом
+    if ! command -v docker &>/dev/null; then
+        log "Скачиваем и запускаем установщик Docker..."
+        if curl -fsSL https://get.docker.com -o /tmp/get-docker.sh 2>/dev/null && sudo sh /tmp/get-docker.sh 2>/dev/null; then
+            log_ok "Docker установлен"
+        else
+            log_warn "Не удалось установить Docker через get.docker.com, пробуем apt..."
+            if sudo apt install -y -qq docker.io docker-compose-plugin 2>/dev/null; then
+                log_ok "Docker установлен через apt"
+            else
+                log_err "Не удалось установить Docker"
+                return 1
+            fi
+        fi
+        rm -f /tmp/get-docker.sh
+    else
+        log_ok "Docker уже установлен"
+    fi
+    
+    # 2. Добавляем пользователя в группу docker
+    if ! groups "$USER" | grep -q docker; then
+        sudo usermod -aG docker "$USER"
+        log "Пользователь $USER добавлен в группу docker (требуется перезагрузка или 'newgrp docker')"
+    fi
+    
+    # 3. Устанавливаем плагин Compose (если нет)
+    if ! command -v docker-compose &>/dev/null && ! docker compose version &>/dev/null 2>&1; then
+        sudo apt install -y -qq docker-compose-plugin 2>/dev/null || log_warn "Docker Compose может быть недоступен"
+    fi
+    
+    # 4. Проверяем место на диске
+    local free_space=$(df -BG /DATA 2>/dev/null | tail -1 | awk '{print $4}' | tr -d 'G')
+    if [ -n "$free_space" ] && [ "$free_space" -lt 10 ]; then
+        log_warn "Мало места на /DATA: ${free_space}GB (рекомендуется минимум 10 ГБ для Immich)"
+        read -p "Продолжить установку? (y/N): " -n 1 -r
+        echo
+        [[ ! $REPLY =~ ^[Yy]$ ]] && { log_warn "Отменено пользователем"; return 0; }
+    fi
+    
+    # 5. Настраиваем Immich
+    log "Настраиваем Immich..."
+    local docker_dir="$REPO_PATH/docker"
+    
+    if [ ! -f "$docker_dir/.env" ] && [ -f "$docker_dir/.env.example" ]; then
+        cp "$docker_dir/.env.example" "$docker_dir/.env"
+        
+        # Генерируем надёжный пароль для БД
+        local db_pass=$(openssl rand -hex 16 2>/dev/null || echo "mbcloud_$(date +%s)_$(openssl rand -hex 4)")
+        sed -i "s/^DB_PASSWORD=.*/DB_PASSWORD=$db_pass/" "$docker_dir/.env"
+        chown "$USER:$USER" "$docker_dir/.env"
+        log_ok "Файл .env создан с надёжным паролем"
+    elif [ ! -f "$docker_dir/.env" ]; then
+        log_warn "Файл .env.example не найден — создайте $docker_dir/.env вручную"
+    fi
+    
+    # 6. Запускаем Immich
+    log "Запускаем Immich (это может занять 2-5 минут)..."
+    cd "$docker_dir"
+    
+    if docker compose up -d 2>&1 | tee /tmp/immich_install.log; then
+        log_ok "Immich запущен!"
+        log "🌐 Откройте в браузере: ${BLUE}http://$(hostname -I | awk '{print $1}'):2283${NC}"
+        log "📱 На телефоне: установите приложение Immich и укажите тот же адрес"
+        log "🔐 Первый пользователь = администратор"
+    else
+        log_err "Не удалось запустить Immich"
+        log "Проверьте логи: docker compose logs -f"
+        log "Или попробуйте позже: cd $docker_dir && docker compose up -d"
+    fi
+    
+    # 7. Добавляем алиас для удобства
+    if ! grep -q "alias immich=" ~/.bashrc 2>/dev/null; then
+        echo "alias immich='cd $docker_dir && docker compose'" >> ~/.bashrc
+        log "Добавлен алиас: ${BLUE}immich${NC} (теперь можно: 'immich up -d', 'immich logs', 'immich ps')"
+    fi
+    
+    log_ok "Установка Docker/Immich завершена"
+}
+
+#===============================================================================
 # 🔧 ФУНКЦИИ УСТАНОВКИ
 #===============================================================================
 
@@ -228,17 +340,13 @@ configure_boot() {
     header "Настройка /boot/firmware/config.txt"
     
     [ ! -f "$CONFIG_FILE" ] && CONFIG_FILE="/boot/config.txt"
-    
-    # 🔧 РЕЗЕРВНАЯ КОПИЯ
     sudo cp "$CONFIG_FILE" "${CONFIG_FILE}.backup.$(date +%Y%m%d%H%M)" 2>/dev/null || true
     log "Резервная копия: ${CONFIG_FILE}.backup.*"
     
-    # 🔧 СКАЧИВАЕМ И ЗАМЕНЯЕМ ПОЛНОСТЬЮ
     log "Скачиваем чистый config.txt с GitHub..."
     local tmp_config="/tmp/mbcloud_config_$$.txt"
     
     if download_file "$CONFIG_CLEAN_URL" "$tmp_config"; then
-        # Заменяем файл полностью
         sudo cp "$tmp_config" "$CONFIG_FILE"
         sudo chown root:root "$CONFIG_FILE"
         sudo chmod 644 "$CONFIG_FILE"
@@ -247,7 +355,6 @@ configure_boot() {
         log "⚠️  Требуется перезагрузка для применения изменений!"
     else
         log_warn "Не удалось скачать config.txt.clean, пробуем умное добавление..."
-        # Fallback: добавляем только недостающее (старый метод)
         sudo bash -c "grep -q '^dtparam=spi=on' '$CONFIG_FILE' || echo 'dtparam=spi=on' >> '$CONFIG_FILE'"
         sudo bash -c "grep -q '^dtparam=i2c_arm=on' '$CONFIG_FILE' || echo 'dtparam=i2c_arm=on' >> '$CONFIG_FILE'"
         sudo bash -c "grep -q 'dtoverlay=i2c-rtc,pcf85063a' '$CONFIG_FILE' || echo 'dtoverlay=i2c-rtc,pcf85063a' >> '$CONFIG_FILE'"
@@ -355,6 +462,10 @@ EOF
 finalize() {
     header "✅ Установка завершена!"
     run_all_checks
+    
+    # 🔧 Опциональная установка Docker/Immich
+    install_docker_immich
+    
     echo ""
     echo -e "${GREEN}${BOLD}═══════════════════════════════════════${NC}"
     echo -e "${GREEN}${BOLD}  mbcloud NAS ГОТОВ!  ${NC}"
@@ -375,8 +486,11 @@ finalize() {
     [[ $REPLY =~ ^[Yy]$ ]] && { log "Перезагрузка..."; sudo reboot; } || { log_warn "⚠️  НЕ ЗАБУДЬТЕ: ${YELLOW}sudo reboot${NC} (иначе SPI/I2C не заработают)!"; }
 }
 
+#===============================================================================
+# 🚀 ГЛАВНАЯ ФУНКЦИЯ
+#===============================================================================
 main() {
-    header "mbcloud NAS Auto-Setup v2.8"
+    header "mbcloud NAS Auto-Setup v2.9"
     check_prerequisites; update_system; install_packages; configure_boot
     download_waveshare_demo; clone_repository; download_main_py; setup_fonts
     setup_systemd_service; setup_storage; setup_samba; finalize
@@ -384,101 +498,3 @@ main() {
 
 [[ "${1:-}" == "--check" || "${1:-}" == "-c" ]] && { run_all_checks; exit $?; }
 main "$@"
-
-#===============================================================================
-# 🐳 ОПЦИОНАЛЬНАЯ УСТАНОВКА DOCKER + IMMICH
-#===============================================================================
-
-install_docker_immich() {
-    header "🐳 Установка Docker и Immich (опционально)"
-    
-    echo -e "${CYAN}Immich — это само-хостимый сервис для синхронизации фото (как Google Photos).${NC}"
-    echo -e "${YELLOW}Требования:${NC}"
-    echo "  • Минимум 2 ГБ свободной памяти"
-    echo "  • Минимум 10 ГБ свободного места на /DATA"
-    echo "  • ~2-3 ГБ для загрузки образов при первом запуске"
-    echo ""
-    
-    read -p "Установить Docker и Immich? (y/N): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        log_warn "Пропускаем установку Docker/Immich"
-        log "Вы всегда можете установить позже: cd ~/mbcloud-system/docker && docker compose up -d"
-        return 0
-    fi
-    
-    log "Начинаем установку Docker..."
-    
-    # 1. Устанавливаем Docker официальным способом
-    if ! command -v docker &>/dev/null; then
-        log "Скачиваем и запускаем установщик Docker..."
-        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh 2>/dev/null && \
-        sudo sh /tmp/get-docker.sh 2>/dev/null && \
-        log_ok "Docker установлен" || \
-        { log_warn "Не удалось установить Docker через get.docker.com, пробуем apt..."; \
-          sudo apt install -y -qq docker.io docker-compose-plugin 2>/dev/null || \
-          log_err "Не удалось установить Docker"; return 1; }
-        rm -f /tmp/get-docker.sh
-    else
-        log_ok "Docker уже установлен"
-    fi
-    
-    # 2. Добавляем пользователя в группу docker
-    if ! groups "$USER" | grep -q docker; then
-        sudo usermod -aG docker "$USER"
-        log "Пользователь $USER добавлен в группу docker (требуется перезагрузка или 'newgrp docker')"
-    fi
-    
-    # 3. Устанавливаем плагин Compose (если нет)
-    if ! command -v docker-compose &>/dev/null && ! docker compose version &>/dev/null; then
-        sudo apt install -y -qq docker-compose-plugin 2>/dev/null || log_warn "Docker Compose может быть недоступен"
-    fi
-    
-    # 4. Проверяем место на диске
-    local free_space=$(df -BG /DATA 2>/dev/null | tail -1 | awk '{print $4}' | tr -d 'G')
-    if [ -n "$free_space" ] && [ "$free_space" -lt 10 ]; then
-        log_warn "Мало места на /DATA: ${free_space}GB (рекомендуется минимум 10 ГБ для Immich)"
-        read -p "Продолжить установку? (y/N): " -n 1 -r
-        echo
-        [[ ! $REPLY =~ ^[Yy]$ ]] && { log_warn "Отменено пользователем"; return 0; }
-    fi
-    
-    # 5. Настраиваем Immich
-    log "Настраиваем Immich..."
-    local docker_dir="$REPO_PATH/docker"
-    
-    if [ ! -f "$docker_dir/.env" ] && [ -f "$docker_dir/.env.example" ]; then
-        cp "$docker_dir/.env.example" "$docker_dir/.env"
-        
-        # Генерируем надёжный пароль для БД
-        local db_pass=$(openssl rand -hex 16 2>/dev/null || echo "mbcloud_$(date +%s)_$(openssl rand -hex 4)")
-        sudo sed -i "s/^DB_PASSWORD=.*/DB_PASSWORD=$db_pass/" "$docker_dir/.env"
-        sudo chown "$USER:$USER" "$docker_dir/.env"
-        log_ok "Файл .env создан с надёжным паролем"
-    elif [ ! -f "$docker_dir/.env" ]; then
-        log_warn "Файл .env.example не найден — создайте ~/.mbcloud-system/docker/.env вручную"
-    fi
-    
-    # 6. Запускаем Immich
-    log "Запускаем Immich (это может занять 2-5 минут)..."
-    cd "$docker_dir"
-    
-    if docker compose up -d 2>&1 | tee /tmp/immich_install.log; then
-        log_ok "Immich запущен!"
-        log "🌐 Откройте в браузере: ${BLUE}http://$(hostname -I | awk '{print $1}'):2283${NC}"
-        log "📱 На телефоне: установите приложение Immich и укажите тот же адрес"
-        log "🔐 Первый пользователь = администратор"
-    else
-        log_err "Не удалось запустить Immich"
-        log "Проверьте логи: docker compose logs -f"
-        log "Или попробуйте позже: cd $docker_dir && docker compose up -d"
-    fi
-    
-    # 7. Добавляем алиас для удобства
-    if ! grep -q "alias immich=" ~/.bashrc 2>/dev/null; then
-        echo "alias immich='cd $docker_dir && docker compose'" >> ~/.bashrc
-        log "Добавлен алиас: ${BLUE}immich${NC} (теперь можно: 'immich up -d', 'immich logs', 'immich ps')"
-    fi
-    
-    log_ok "Установка Docker/Immich завершена"
-}
