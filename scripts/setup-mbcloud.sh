@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# mbcloud NAS - Полный скрипт установки и настройки
+# mbcloud NAS - Полный скрипт установки (v2.1 - с исправленным sudo)
 # Использование: curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-mbcloud.sh | sudo bash
 #===============================================================================
 
@@ -19,7 +19,7 @@ REPO_BRANCH="main"
 REPO_PATH="/home/${SUDO_USER:-mibitok}/mbcloud-system"
 MAIN_PY_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/display/main.py"
 FONT_URL="https://raw.githubusercontent.com/mibitok/mbcloud-system/${REPO_BRANCH}/display/fonts/baveuse_0.ttf"
-WAVESHARE_DEMO_URL="https://files.waveshare.com/wiki/CM4-NAS-Double-Deck/CM4-NAS-Double-Deck_Demo.zip"
+WAVESHARE_URL="https://files.waveshare.com/wiki/CM4-NAS-Double-Deck/CM4-NAS-Double-Deck_Demo.zip"
 CONFIG_FILE="/boot/firmware/config.txt"
 SERVICE_FILE="/etc/systemd/system/mbcloud-display.service"
 DATA_MOUNT="/DATA"
@@ -30,13 +30,13 @@ log() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_ok() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_err() { echo -e "${RED}[ERROR]${NC} $1"; }
+
 header() {
     echo ""
     echo -e "${GREEN}╔════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║  mbcloud NAS Setup v2.0            ║${NC}"
+    echo -e "${GREEN}║  mbcloud NAS Setup v2.1            ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════╝${NC}"
-    echo "  Время: $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "  Пользователь: $USER $([ $EUID -eq 0 ] && echo '(root)' || echo '')"
+    echo "  $(date '+%Y-%m-%d %H:%M:%S') | User: $USER"
     echo ""
 }
 
@@ -65,7 +65,7 @@ check_prerequisites() {
 update_system() {
     header "Обновление системы"
     log "Обновляем пакеты..."
-    apt update -qq && apt upgrade -y -qq
+    sudo apt update -qq && sudo apt upgrade -y -qq
     log_ok "Система обновлена"
 }
 
@@ -73,7 +73,7 @@ install_packages() {
     header "Установка зависимостей"
     
     log "Устанавливаем базовые пакеты..."
-    apt install -y -qq \
+    sudo apt install -y -qq \
         git curl wget unzip htop tmux \
         python3-pip python3-venv \
         mergerfs smartmontools \
@@ -83,7 +83,7 @@ install_packages() {
         2>/dev/null || log_warn "Некоторые пакеты могли не установиться"
     
     log "Устанавливаем Python-зависимости..."
-    pip3 install -q --break-system-packages \
+    sudo pip3 install -q --break-system-packages \
         psutil>=5.9.0 \
         gpiozero>=2.0 \
         Pillow>=9.0.0 \
@@ -95,23 +95,17 @@ install_packages() {
 configure_boot() {
     header "Настройка /boot/firmware/config.txt"
     
+    # Определяем правильный путь к config.txt
     [ ! -f "$CONFIG_FILE" ] && CONFIG_FILE="/boot/config.txt"
-    cp "$CONFIG_FILE" "${CONFIG_FILE}.backup.$(date +%Y%m%d%H%M)" 2>/dev/null || true
     
-    # Добавляем настройки, если их нет
-    grep -q "^dtparam=spi=on" "$CONFIG_FILE" || echo "dtparam=spi=on" >> "$CONFIG_FILE"
-    grep -q "^dtparam=i2c_arm=on" "$CONFIG_FILE" || echo "dtparam=i2c_arm=on" >> "$CONFIG_FILE"
-    grep -q "dtoverlay=i2c-rtc,pcf85063a" "$CONFIG_FILE" || {
-        echo "" >> "$CONFIG_FILE"
-        echo "# RTC PCF85063a для CM4-NAS-Double-Deck" >> "$CONFIG_FILE"
-        echo "dtoverlay=i2c-rtc,pcf85063a" >> "$CONFIG_FILE"
-    }
+    # Создаём резервную копию с правами root
+    sudo cp "$CONFIG_FILE" "${CONFIG_FILE}.backup.$(date +%Y%m%d%H%M)" 2>/dev/null || true
     
-    # Отключаем аудио (опционально)
-    grep -q "^dtparam=audio=off" "$CONFIG_FILE" || {
-        echo "# Audio disabled for mbcloud NAS" >> "$CONFIG_FILE"
-        echo "dtparam=audio=off" >> "$CONFIG_FILE"
-    }
+    # Добавляем настройки с использованием sudo
+    sudo bash -c "grep -q '^dtparam=spi=on' '$CONFIG_FILE' || echo 'dtparam=spi=on' >> '$CONFIG_FILE'"
+    sudo bash -c "grep -q '^dtparam=i2c_arm=on' '$CONFIG_FILE' || echo 'dtparam=i2c_arm=on' >> '$CONFIG_FILE'"
+    sudo bash -c "grep -q 'dtoverlay=i2c-rtc,pcf85063a' '$CONFIG_FILE' || echo -e '\ndtoverlay=i2c-rtc,pcf85063a' >> '$CONFIG_FILE'"
+    sudo bash -c "grep -q '^dtparam=audio=off' '$CONFIG_FILE' || echo 'dtparam=audio=off' >> '$CONFIG_FILE'"
     
     log_ok "Конфигурация обновлена (требуется перезагрузка)"
 }
@@ -122,12 +116,24 @@ download_waveshare_demo() {
     cd /home/$USER
     if [ ! -d "CM4-NAS-Double-Deck_Demo" ]; then
         log "Скачиваем демо-код..."
-        wget -q -O demo.zip "$WAVESHARE_DEMO_URL"
+        wget -q -O demo.zip "$WAVESHARE_URL"
         unzip -q demo.zip
         rm -f demo.zip
         log_ok "Демо-код скачан"
     else
         log_ok "Демо-код уже присутствует"
+    fi
+    
+    # Исправляем конфликт GPIO 19 в lcdconfig.py (с правами)
+    local lcdconfig="/home/$USER/CM4-NAS-Double-Deck_Demo/RaspberryPi/lib/lcdconfig.py"
+    if [ -f "$lcdconfig" ]; then
+        log "Исправляем конфликт GPIO 19 в lcdconfig.py..."
+        sudo sed -i 's/self\.FAN_PIN = self\.gpio_pwm/# self.FAN_PIN = self.gpio_pwm/g' "$lcdconfig"
+        sudo sed -i 's/self\.FAN_PIN\.value = 0/# self.FAN_PIN.value = 0/g' "$lcdconfig"
+        sudo sed -i 's/self\.FAN_PIN\.close()/# self.FAN_PIN.close()/g' "$lcdconfig"
+        # Очищаем кэш Python с правами
+        sudo rm -rf "$(dirname "$lcdconfig")/__pycache__" 2>/dev/null || true
+        log_ok "lcdconfig.py исправлен"
     fi
 }
 
@@ -139,24 +145,27 @@ clone_repository() {
         cd "$REPO_PATH" && git pull -q
     else
         log "Клонируем репозиторий..."
-        git clone -b "$REPO_BRANCH" "$REPO_URL" "$REPO_PATH" 2>/dev/null || {
+        # Клонируем от имени пользователя, а не root
+        sudo -u "$USER" git clone -b "$REPO_BRANCH" "$REPO_URL" "$REPO_PATH" 2>/dev/null || {
             # Fallback: создаём структуру вручную
-            mkdir -p "$REPO_PATH"/{display/fonts,scripts,systemd,docker,config,docs}
+            sudo mkdir -p "$REPO_PATH"/{display/fonts,scripts,systemd,docker,config,docs}
+            sudo chown -R "$USER:$USER" "$REPO_PATH"
         }
     fi
     
-    chmod +x "$REPO_PATH/scripts/"*.sh 2>/dev/null || true
+    # Делаем скрипты исполняемыми
+    sudo chmod +x "$REPO_PATH/scripts/"*.sh 2>/dev/null || true
     log_ok "Репозиторий готов"
 }
 
 download_main_py() {
     header "Скачивание main.py с GitHub"
     
-    mkdir -p "$REPO_PATH/display"
+    sudo mkdir -p "$REPO_PATH/display"
     
     log "Скачиваем main.py..."
     if curl -sSL -o "$REPO_PATH/display/main.py" "$MAIN_PY_URL"; then
-        if python3 -m py_compile "$REPO_PATH/display/main.py" 2>/dev/null; then
+        if sudo python3 -m py_compile "$REPO_PATH/display/main.py" 2>/dev/null; then
             log_ok "main.py скачан и проверен"
         else
             log_err "Ошибка синтаксиса в скачанном main.py!"
@@ -166,12 +175,15 @@ download_main_py() {
         log_err "Не удалось скачать main.py"
         return 1
     fi
+    
+    # Возвращаем права пользователю
+    sudo chown -R "$USER:$USER" "$REPO_PATH/display" 2>/dev/null || true
 }
 
 setup_fonts() {
     header "Настройка шрифтов"
     
-    mkdir -p "$REPO_PATH/display/fonts"
+    sudo mkdir -p "$REPO_PATH/display/fonts"
     
     if [ ! -s "$REPO_PATH/display/fonts/baveuse_0.ttf" ]; then
         log "Скачиваем шрифт Baveuse..."
@@ -181,37 +193,21 @@ setup_fonts() {
     fi
     
     if [ -s "$REPO_PATH/display/fonts/baveuse_0.ttf" ]; then
-        log_ok "Шрифт установлен: $(stat -c%s "$REPO_PATH/display/fonts/baveuse_0.ttf") байт"
+        local size=$(sudo stat -c%s "$REPO_PATH/display/fonts/baveuse_0.ttf" 2>/dev/null || echo 0)
+        log_ok "Шрифт установлен: $size байт"
     else
         log_warn "Шрифт не установлен — дисплей будет использовать шрифт по умолчанию"
     fi
-}
-
-setup_lcdconfig() {
-    header "Исправление lcdconfig.py (конфликт GPIO)"
     
-    local lcdconfig="/home/$USER/CM4-NAS-Double-Deck_Demo/RaspberryPi/lib/lcdconfig.py"
-    
-    if [ -f "$lcdconfig" ]; then
-        # Закомментируем строки с FAN_PIN чтобы не было конфликта с gpiozero
-        if grep -q "self.FAN_PIN = self.gpio_pwm" "$lcdconfig" 2>/dev/null; then
-            log "Исправляем конфликт GPIO 19 в lcdconfig.py..."
-            sed -i 's/^        self\.FAN_PIN = self\.gpio_pwm/        # self.FAN_PIN = self.gpio_pwm/' "$lcdconfig"
-            sed -i 's/^        self\.FAN_PIN\.value = 0/        # self.FAN_PIN.value = 0/' "$lcdconfig"
-            sed -i 's/^        self\.FAN_PIN\.close()/        # self.FAN_PIN.close()/' "$lcdconfig"
-            log_ok "lcdconfig.py исправлен"
-        fi
-        
-        # Очистим кэш Python
-        rm -rf "$(dirname "$lcdconfig")/__pycache__" 2>/dev/null || true
-    fi
+    # Возвращаем права
+    sudo chown -R "$USER:$USER" "$REPO_PATH/display/fonts" 2>/dev/null || true
 }
 
 setup_systemd_service() {
     header "Настройка systemd сервиса"
     
-    # Создаём service файл
-    cat > "$SERVICE_FILE" << EOF
+    # Создаём service файл с использованием sudo для записи в /etc/
+    sudo tee "$SERVICE_FILE" > /dev/null << EOF
 [Unit]
 Description=mbcloud NAS LCD Display Service
 After=network.target multi-user.target
@@ -229,9 +225,9 @@ Environment="PYTHONUNBUFFERED=1"
 WantedBy=multi-user.target
 EOF
     
-    # Применяем изменения
-    systemctl daemon-reload
-    systemctl enable mbcloud-display.service 2>/dev/null || true
+    # Применяем изменения с правами root
+    sudo systemctl daemon-reload
+    sudo systemctl enable mbcloud-display.service 2>/dev/null || true
     
     log_ok "Сервис настроен и включён в автозагрузку"
 }
@@ -239,11 +235,11 @@ EOF
 setup_storage() {
     header "Настройка хранилища (MergerFS)"
     
-    # Создаём точки монтирования
-    mkdir -p /mnt/disk1 /mnt/disk2 "$DATA_MOUNT"
+    # Создаём точки монтирования с правами
+    sudo mkdir -p /mnt/disk1 /mnt/disk2 "$DATA_MOUNT"
     
     # Проверяем, настроен ли fstab
-    if ! grep -q "fuse.mergerfs" /etc/fstab 2>/dev/null; then
+    if ! sudo grep -q "fuse.mergerfs" /etc/fstab 2>/dev/null; then
         log_warn "MergerFS не настроен в /etc/fstab"
         log "Для настройки выполните вручную:"
         echo "  echo '/mnt/disk1:/mnt/disk2  $DATA_MOUNT  fuse.mergerfs  defaults,allow_other,use_ino,category.create=epff  0  0' | sudo tee -a /etc/fstab"
@@ -253,9 +249,9 @@ setup_storage() {
     
     # Создаём папки для приложений
     for dir in photos import immich-postgres immich-redis backups; do
-        mkdir -p "$DATA_MOUNT/$dir"
+        sudo mkdir -p "$DATA_MOUNT/$dir"
     done
-    chown -R "$USER:$USER" "$DATA_MOUNT" 2>/dev/null || true
+    sudo chown -R "$USER:$USER" "$DATA_MOUNT" 2>/dev/null || true
     
     log_ok "Хранилище настроено"
 }
@@ -263,8 +259,16 @@ setup_storage() {
 setup_samba() {
     header "Настройка Samba (сетевой доступ)"
     
-    if ! grep -q "^\[mbcloud\]" /etc/samba/smb.conf 2>/dev/null; then
-        cat >> /etc/samba/smb.conf << EOF
+    # Убеждаемся, что samba установлен
+    if ! command -v smbpasswd &> /dev/null; then
+        log "Устанавливаем Samba..."
+        sudo apt install -y -qq samba 2>/dev/null || log_warn "Не удалось установить Samba"
+    fi
+    
+    # Проверяем, есть ли уже наш share
+    if ! sudo grep -q "^\[mbcloud\]" /etc/samba/smb.conf 2>/dev/null; then
+        # Добавляем share с использованием sudo для записи в /etc/
+        sudo bash -c "cat >> /etc/samba/smb.conf << EOF
 
 [mbcloud]
    path = $DATA_MOUNT
@@ -275,14 +279,23 @@ setup_samba() {
    directory mask = 0755
    force user = $USER
 EOF
+"
         log_ok "Samba share [mbcloud] добавлен"
+        
+        # Перезапускаем Samba с правами root
+        sudo systemctl restart smbd 2>/dev/null || true
+        sudo systemctl enable smbd 2>/dev/null || true
     else
         log_ok "Samba share уже настроен"
     fi
+    
+    # Настройка пароля (интерактивная, требует ввода пользователем)
+    log "Для доступа к файлам по сети задайте пароль Samba:"
+    log "Выполните: sudo smbpasswd -a $USER"
 }
 
 finalize() {
-    header "Завершение установки"
+    header "✅ Установка завершена!"
     
     echo ""
     echo -e "${GREEN}${BOLD}═══════════════════════════════════════${NC}"
@@ -302,7 +315,7 @@ finalize() {
     
     echo -e "${YELLOW}Полезные команды:${NC}"
     echo "  • Статус дисплея:  ${BLUE}sudo systemctl status mbcloud-display.service${NC}"
-    echo "  • Логи дисплея:    ${BLUE}journalctl -u mbcloud-display.service -f${NC}"
+    echo "  • Логи:            ${BLUE}journalctl -u mbcloud-display.service -f${NC}"
     echo "  • Диагностика:     ${BLUE}~/mbcloud-system/scripts/mbcloud-diagnose.sh${NC}"
     echo "  • Температура:     ${BLUE}vcgencmd measure_temp${NC}"
     echo "  • Место на диске:  ${BLUE}df -h /DATA${NC}"
@@ -313,7 +326,7 @@ finalize() {
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         log "Перезагрузка..."
-        reboot
+        sudo reboot
     else
         log_warn "Не забудьте перезагрузить: ${YELLOW}sudo reboot${NC}"
     fi
@@ -323,7 +336,7 @@ finalize() {
 # 🚀 ГЛАВНАЯ ФУНКЦИЯ
 #===============================================================================
 main() {
-    header "mbcloud NAS Auto-Setup"
+    header "mbcloud NAS Auto-Setup v2.1"
     
     check_prerequisites
     update_system
@@ -331,9 +344,8 @@ main() {
     configure_boot
     download_waveshare_demo
     clone_repository
-    download_main_py          # 🔥 Скачивает main.py с GitHub!
+    download_main_py
     setup_fonts
-    setup_lcdconfig           # 🔥 Исправляет конфликт GPIO
     setup_systemd_service
     setup_storage
     setup_samba
