@@ -1,6 +1,6 @@
 # 🖥️ mbcloud NAS
 
-**Домашний NAS на Raspberry Pi CM4 с ретро-дисплеем, умным вентилятором и фото-сервером Immich**
+**Домашний NAS на Raspberry Pi CM4 с дисплеем, умным вентилятором и фото-сервером Immich**
 
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Raspberry%20Pi%20CM4-blue?style=for-the-badge&logo=raspberrypi" alt="Platform">
@@ -15,7 +15,7 @@
 
 | Компонент | Описание |
 |-----------|----------|
-| 🖥️ **Ретро-дисплей** | 2.4" IPS 320×240, шрифт Baveuse, 5 страниц мониторинга, спящий режим |
+| 🖥️ **Дисплей** | 2.4" IPS 320×240, шрифт Baveuse, 5 страниц мониторинга, спящий режим |
 | 🌬️ **Умный вентилятор** | Авто-управление через GPIO 19 (sysfs), включение при > 60°C, плавный контроль |
 | 💾 **Хранилище** | 2× SATA SSD/HDD, MergerFS объединение в `/DATA`, Samba доступ |
 | 🐳 **Immich** | Фото-сервер как Google Photos, синхронизация с iPhone/Android |
