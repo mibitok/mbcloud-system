@@ -48,8 +48,11 @@
 # 1. Базовая система (дисплей + вентилятор + Python)
 curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-mbcloud.sh | sudo bash
 
-# 2. Рекомендуемые дополнения (Immich + MergerFS + авто-обновление)
+# 2. Подгатовка дисков
+curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-disks.sh | sudo bash
+
+# 3. Рекомендуемые дополнения (Immich + MergerFS + авто-обновление)
 curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/install-addons.sh | sudo bash -s -- --recommended
 
-# 3. Диагностика
+# 4. Диагностика
 ~/mbcloud-system/scripts/health-check.sh
