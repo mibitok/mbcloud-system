@@ -2,7 +2,6 @@
 #===============================================================================
 # mbcloud NAS - Health Check Script v1.0
 # Использование: ~/mbcloud-system/scripts/health-check.sh
-# Или: curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/health-check.sh | bash
 #===============================================================================
 
 # 🎨 Цвета
@@ -27,7 +26,6 @@ check_display() {
     log_info "Проверка дисплея..."
     if sudo systemctl is-active mbcloud-display.service &>/dev/null; then
         log_ok "Сервис дисплея: активен"
-        # Проверка логов на ошибки
         if journalctl -u mbcloud-display.service -n 10 --no-pager 2>/dev/null | grep -qi "error\|fail"; then
             log_warn "В логах есть ошибки — проверьте: journalctl -u mbcloud-display.service -f"
         else
@@ -80,7 +78,6 @@ check_immich() {
         local containers=$(docker compose -f ~/mbcloud-system/docker/docker-compose.yml ps -q 2>/dev/null | wc -l)
         if [ "$containers" -gt 0 ]; then
             log_ok "Immich: $containers контейнеров запущено"
-            # Проверка порта
             if sudo ss -tlnp 2>/dev/null | grep -q ":2283 "; then
                 log_ok "Порт 2283: слушается"
             else
@@ -100,7 +97,6 @@ check_network() {
     local ip=$(hostname -I | awk '{print $1}')
     if [ -n "$ip" ]; then
         log_ok "IP адрес: $ip"
-        # Проверка доступности из сети
         if ping -c 1 -W 1 "$ip" &>/dev/null; then
             log_ok "Сеть: устройство доступно"
         else
