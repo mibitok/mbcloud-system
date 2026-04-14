@@ -1,7 +1,3 @@
-cd ~/Projects/mbcloud-system
-
-# 1. Создайте скрипт с правильными цветами
-cat > scripts/install-addons.sh << 'SCRIPT_EOF'
 #!/bin/bash
 #===============================================================================
 # mbcloud NAS - Установка дополнительных компонентов (v1.1 - non-interactive flags)
@@ -278,15 +274,3 @@ main() {
 }
 
 main "$@"
-SCRIPT_EOF
-
-# 2. Сделайте исполняемым
-chmod +x scripts/install-addons.sh
-
-# 3. Проверьте локально (не через curl!)
-./scripts/install-addons.sh --help
-
-# 4. Отправьте на GitHub
-git add scripts/install-addons.sh
-git commit -m "Fix v1.1: proper escape sequences for colors and logic"
-git push origin main
