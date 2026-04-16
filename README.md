@@ -45,11 +45,18 @@
 ### Полный запуск за 1 минуту:
 
 ```bash
-# 1. Базовая система (дисплей + вентилятор + Python)
-curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-mbcloud.sh | sudo bash
+# 1. Подгатовка дисков
+# 1.1. Скачиваем скрипт в домашнюю папку
+curl -fsSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-disks.sh -o ~/setup-disks.sh
 
-# 2. Подгатовка дисков
-curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-disks.sh | sudo bash
+  # 1.2. Делаем его исполняемым
+chmod +x ~/setup-disks.sh
+
+  # 1.3. Запускаем с правами root в автоматическом режиме (выберет sda и sdb)
+sudo ~/setup-disks.sh --auto
+
+  # 2. Базовая система (дисплей + вентилятор + Python)
+curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-mbcloud.sh | sudo bash
 
 # 3. Рекомендуемые дополнения (Immich + MergerFS + авто-обновление)
 curl -sSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/install-addons.sh | sudo bash -s -- --recommended
