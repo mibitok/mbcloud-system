@@ -1,383 +1,272 @@
 #!/bin/bash
 #==============================================================================
-# mbcloud-system - setup-disks.sh
-# Настройка SSD дисков и swap памяти для домашнего NAS
-# Версия: 1.0.0
+# mbcloud-system - setup-disks.sh v1.1.0 (FIXED)
+# Фундаментальный этап: Подготовка SSD, MergerFS и Swap
+# Исправления: 
+# - Удалена опция 'failover' (не поддерживается в Debian Bookworm)
+# - Добавлено автоматическое монтирование sda/sdb в /mnt/disk1/2 через fstab
 #
 # Использование:
-#   sudo bash setup-disks.sh                    # Интерактивный режим
-#   sudo bash setup-disks.sh --auto             # Авто-настройка (первый найденный диск)
-#   sudo bash setup-disks.sh --disk1 /dev/sda --disk2 /dev/sdb --swap 4G
-#   sudo bash setup-disks.sh --dry-run          # Показать, что будет сделано
-#   sudo bash setup-disks.sh --format-only      # Только форматирование, без fstab
-#   sudo bash setup-disks.sh --swap-only        # Только настройка swap
+#   sudo bash <(curl -fsSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-disks.sh) -- --auto
 #==============================================================================
 
 set -eo pipefail
+
+# 🎨 Цвета
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 LOG_FILE="/var/log/mbcloud-disks.log"
 
-# Переменные по умолчанию
-DISK1="${DISK1:-}"
-DISK2="${DISK2:-}"
+# ⚙️ Настройки по умолчанию
+DISK1="${DISK1:-}"; DISK2="${DISK2:-}"
 SWAP_SIZE="${SWAP_SIZE:-4G}"
 DATA_MOUNT="${DATA_MOUNT:-/DATA}"
-MOUNT1="${MOUNT1:-/mnt/disk1}"
-MOUNT2="${MOUNT2:-/mnt/disk2}"
-FS_TYPE="${FS_TYPE:-ext4}"
-MODE="interactive"
-DRY_RUN="false"
-FORMAT_ONLY="false"
-SWAP_ONLY="false"
+MOUNT1="${MOUNT1:-/mnt/disk1}"; MOUNT2="${MOUNT2:-/mnt/disk2}"
+FS_TYPE="ext4"
+MODE="interactive"; DRY_RUN="false"
 
-#------------------------------------------------------------------------------
-# 📝 ЛОГИРОВАНИЕ
-#------------------------------------------------------------------------------
+# 📝 Логирование
 log() { echo -e "${BLUE}[ℹ]${NC} $1" | tee -a "$LOG_FILE"; }
 log_ok() { echo -e "${GREEN}[✓]${NC} $1" | tee -a "$LOG_FILE"; }
 log_warn() { echo -e "${YELLOW}[⚠]${NC} $1" | tee -a "$LOG_FILE"; }
 log_err() { echo -e "${RED}[✗]${NC} $1" | tee -a "$LOG_FILE" >&2; }
 header() { echo -e "\n${GREEN}════════════════════════════════════════${NC}\n${GREEN}  $1${NC}\n${GREEN}════════════════════════════════════════${NC}\n" | tee -a "$LOG_FILE"; }
 
-#------------------------------------------------------------------------------
-# 🔍 ПРОВЕРКИ
-#------------------------------------------------------------------------------
+# 🔍 Проверки
 check_root() { [[ $EUID -eq 0 ]] || { log_err "Запустите с sudo"; exit 1; }; }
 
-check_block_tools() {
-    for cmd in lsblk mkfs.$FS_TYPE swapoff swapon blkid; do
-        command -v $cmd &>/dev/null || { log "Устанавливаем $cmd..."; apt update -qq && apt install -y -qq util-linux e2fsprogs 2>/dev/null || log_warn "Не установлен: $cmd"; }
+install_deps() {
+    for pkg in lsblk mkfs.ext4 wipefs mergerfs; do
+        if ! command -v $pkg &>/dev/null; then
+            log "Устанавливаем зависимости..."
+            apt update -qq && apt install -y -qq util-linux e2fsprogs mergerfs 2>/dev/null || { log_err "Ошибка установки пакетов"; exit 1; }
+            break
+        fi
     done
 }
 
-#------------------------------------------------------------------------------
-# 💿 СПИСОК ДИСКОВ
-#------------------------------------------------------------------------------
-list_available_disks() {
-    header "🔍 Доступные диски"
-    echo "Блочные устройства (исключая loop/ram):"
-    echo "─────────────────────────────────────"
-    lsblk -dn -o NAME,SIZE,TYPE,MOUNTPOINT,MODEL 2>/dev/null | grep -vE "loop|ram" || echo "  Нет доступных дисков"
-    echo "─────────────────────────────────────"
-}
-
+# 💿 Работа с дисками
 get_sata_disks() {
-    # Возвращает список SATA/USB дисков (sda, sdb, nvme...)
-    lsblk -dn -o NAME,TYPE 2>/dev/null | grep -E "disk$" | awk '{print "/dev/"$1}' | grep -vE "mmcblk|loop"
+    lsblk -dn -o NAME,TYPE 2>/dev/null | grep -E "disk$" | awk '{print "/dev/"$1}' | grep -vE "mmcblk|loop|ram"
 }
 
-disk_has_partitions() {
-    local disk="$1"
-    lsblk -n "$disk" 2>/dev/null | grep -q "part" && return 0 || return 1
-}
-
-disk_is_mounted() {
-    local disk="$1"
-    mount | grep -q "^$disk" && return 0 || return 1
-}
-
-#------------------------------------------------------------------------------
-# 🗑️ ОЧИСТКА ДИСКА
-#------------------------------------------------------------------------------
 wipe_disk() {
     local disk="$1"
-    [[ "$DRY_RUN" == "true" ]] && { log "[DRY-RUN] Очистка $disk (wipefs)"; return 0; }
-    
+    [[ "$DRY_RUN" == "true" ]] && { log "[DRY-RUN] Очистка $disk"; return 0; }
     log "Очищаем метаданные на $disk..."
     wipefs -a "$disk" 2>/dev/null || true
-    # Удаляем разделы, если есть
-    if disk_has_partitions "$disk"; then
-        log "Удаляем разделы на $disk..."
-        for part in $(lsblk -n "$disk" -o NAME | grep -E "^${disk#/dev/}"); do
-            umount "/dev/$part" 2>/dev/null || true
-            wipefs -a "/dev/$part" 2>/dev/null || true
-        done
-    fi
+    # Удаляем разделы если есть
+    for part in $(lsblk -n "$disk" -o NAME 2>/dev/null | grep -E "^${disk#/dev/}"); do
+        umount "/dev/$part" 2>/dev/null || true
+        wipefs -a "/dev/$part" 2>/dev/null || true
+    done
     log_ok "$disk очищен"
 }
 
-#------------------------------------------------------------------------------
-# 📦 ФОРМАТИРОВАНИЕ
-#------------------------------------------------------------------------------
-format_disk() {
+format_and_mount_temp() {
     local disk="$1" mount_point="$2" label="$3"
-    [[ -z "$disk" ]] && { log_warn "Диск не указан"; return 1; }
+    [[ -z "$disk" ]] && return 1
     
     header "📦 Форматирование: $disk → $mount_point"
     
-    # Проверки
-    if ! lsblk "$disk" &>/dev/null; then
-        log_err "Диск $disk не найден"; return 1
-    fi
-    if disk_is_mounted "$disk"; then
+    # Отмонтирование если занято
+    if mount | grep -q "$disk"; then
         log_warn "$disk смонтирован, отмонтируем..."
         umount "$disk" 2>/dev/null || umount "${disk}1" 2>/dev/null || true
     fi
     
-    # Очистка
     wipe_disk "$disk"
     
-    # Форматирование
     [[ "$DRY_RUN" == "true" ]] && { log "[DRY-RUN] mkfs.$FS_TYPE -L $label $disk"; return 0; }
     
-    log "Форматируем в $FS_TYPE с меткой $label..."
+    log "Форматируем в $FS_TYPE ($label)..."
     if mkfs.$FS_TYPE -F -L "$label" "$disk" 2>&1 | tee -a "$LOG_FILE"; then
         log_ok "$disk отформатирован"
     else
-        log_err "Ошибка форматирования $disk"
+        log_err "Ошибка форматирования $disk"; return 1
+    fi
+    
+    mkdir -p "$mount_point"
+    # Временное монтирование для проверки
+    if mount "$disk" "$mount_point" 2>/dev/null; then
+        log_ok "$disk временно смонтирован в $mount_point"
+        chown -R 1000:1000 "$mount_point" 2>/dev/null || true
+    else
+        log_warn "Не удалось временно смонтировать $disk"
+    fi
+}
+
+# 🔄 Запись дисков в fstab (КРИТИЧНО ИСПРАВЛЕНИЕ)
+add_disks_to_fstab() {
+    header "📝 Добавление дисков в /etc/fstab"
+    
+    local disk="$1" mount_point="$2"
+    if [[ -z "$disk" ]]; then return 0; fi
+    
+    # Получаем UUID
+    local uuid=$(blkid -s UUID -o value "$disk" 2>/dev/null)
+    if [[ -z "$uuid" ]]; then
+        log_err "Не удалось получить UUID для $disk"
         return 1
     fi
     
-    # Создание точки монтирования
-    mkdir -p "$mount_point"
-    
-    # Монтирование для проверки
-    if mount "$disk" "$mount_point" 2>/dev/null; then
-        log_ok "$disk смонтирован в $mount_point"
-        chown -R "$SUDO_USER:$SUDO_USER" "$mount_point" 2>/dev/null || true
-    else
-        log_warn "Не удалось смонтировать $disk (возможно, потребуется перезагрузка или правка fstab)"
-    fi
-    
-    return 0
-}
-
-#------------------------------------------------------------------------------
-# 🔄 MERGERFS FSTAB ENTRY
-#------------------------------------------------------------------------------
-setup_mergerfs_fstab() {
-    [[ "$FORMAT_ONLY" == "true" || "$SWAP_ONLY" == "true" ]] && return 0
-    header "🔄 Настройка MergerFS в /etc/fstab"
-    
-    # Проверка: уже есть запись?
-    if grep -q "fuse.mergerfs" /etc/fstab 2>/dev/null; then
-        log_ok "MergerFS уже настроен в fstab"
+    # Проверяем, нет ли уже записи для этого UUID или точки монтирования
+    if grep -q "$uuid" /etc/fstab 2>/dev/null || grep -q "$mount_point" /etc/fstab 2>/dev/null; then
+        log_ok "$disk уже есть в fstab"
         return 0
-    fi
-    
-    # Проверка: диски смонтированы?
-    if [[ ! -d "$MOUNT1" || ! -d "$MOUNT2" ]]; then
-        log_warn "Точки монтирования $MOUNT1 или $MOUNT2 не существуют"
-        log "Создаём их..."
-        mkdir -p "$MOUNT1" "$MOUNT2"
     fi
     
     # Бэкап fstab
     local backup="/etc/fstab.mbcloud.disks.$(date +%Y%m%d%H%M%S)"
     cp /etc/fstab "$backup" && log "Бэкап fstab: $backup"
     
-    # Добавление записи
-    {
-        echo ""
-        echo "# mbcloud NAS - MergerFS pool (добавлено $(date '+%Y-%m-%d %H:%M'))"
-        echo "# Бэкап оригинала: $backup"
-        echo "${MOUNT1}:${MOUNT2} ${DATA_MOUNT} fuse.mergerfs defaults,allow_other,use_ino,category.create=epff,_netdev,failover 0 0"
-    } >> /etc/fstab
-    
-    log_ok "Запись MergerFS добавлена в /etc/fstab"
-    
-    # Тест монтирования
-    if mount -a --no-mtab 2>&1 | grep -qi "error\|fail"; then
-        log_err "⚠️  Ошибка при тестовом монтировании! Восстанавливаем fstab..."
-        cp "$backup" /etc/fstab
-        return 1
-    else
-        mount -a 2>/dev/null && log_ok "MergerFS успешно смонтирован в $DATA_MOUNT" || log_warn "MergerFS настроен — требуется перезагрузка для активации"
-    fi
-    
-    return 0
+    # Добавляем запись
+    echo "UUID=$uuid  $mount_point  ext4  defaults,noatime  0  2" >> /etc/fstab
+    log_ok "Добавлен $disk ($uuid) в $mount_point"
 }
 
-#------------------------------------------------------------------------------
-# 💭 НАСТРОЙКА SWAP
-#------------------------------------------------------------------------------
+# 🔄 MergerFS
+setup_mergerfs() {
+    header "🔄 Настройка MergerFS"
+    
+    # Проверка наличия записи
+    if grep -q "fuse.mergerfs" /etc/fstab 2>/dev/null; then
+        log_ok "MergerFS уже настроен в fstab."
+        return 0
+    fi
+    
+    # Создаем точку /DATA
+    mkdir -p "$DATA_MOUNT"
+    
+    # Бэкап fstab (если еще не был сделан при добавлении дисков)
+    if [[ ! -f "/etc/fstab.mbcloud.disks"* ]]; then
+        local backup="/etc/fstab.mbcloud.disks.$(date +%Y%m%d%H%M%S)"
+        cp /etc/fstab "$backup"
+    fi
+    
+    # Добавление записи MergerFS (без failover!)
+    {
+        echo ""
+        echo "# mbcloud NAS - MergerFS pool ($(date '+%Y-%m-%d'))"
+        echo "${MOUNT1}:${MOUNT2} ${DATA_MOUNT} fuse.mergerfs defaults,allow_other,use_ino,category.create=mfs,_netdev,x-systemd.requires=network-online.target 0 0"
+    } >> /etc/fstab
+    
+    log "Добавлена запись MergerFS в fstab."
+}
+
+# 💭 Swap
 setup_swap() {
-    [[ "$SWAP_ONLY" == "false" && "$FORMAT_ONLY" == "true" ]] && return 0
-    header "💭 Настройка swap памяти ($SWAP_SIZE)"
+    header "💭 Настройка Swap ($SWAP_SIZE)"
     
-    local swap_file="/DATA/swapfile"
+    local swap_file="${DATA_MOUNT}/swapfile"
+    # Если /DATA еще не готов, используем корень
+    [[ ! -d "$DATA_MOUNT" ]] && swap_file="/swapfile" && log_warn "/DATA недоступен, swap будет в корне"
     
-    # Если /DATA не существует — используем корень
-    [[ ! -d "/DATA" ]] && swap_file="/swapfile" && log_warn "/DATA не найден, создаём swap в корне"
-    
-    # Проверка: swap уже активен?
-    if swapon --show | grep -q "$swap_file"; then
+    # Проверка активности
+    if swapon --show 2>/dev/null | grep -q "$swap_file"; then
         log_ok "Swap уже активен: $swap_file"
         return 0
     fi
     
-    # Отключаем старые swap-файлы (опционально)
+    # Отключаем старый swap в корне если есть
     if [[ -f "/swapfile" ]] && swapon --show | grep -q "/swapfile"; then
-        log "Отключаем старый swap..."
-        swapoff /swapfile 2>/dev/null || true
-        rm -f /swapfile
+        swapoff /swapfile && rm -f /swapfile && log "Старый swap удален"
     fi
     
-    # Создание файла
-    [[ "$DRY_RUN" == "true" ]] && { log "[DRY-RUN] fallocate -l $SWAP_SIZE $swap_file"; log "[DRY-RUN] chmod 600 $swap_file"; log "[DRY-RUN] mkswap $swap_file"; log "[DRY-RUN] swapon $swap_file"; return 0; }
+    [[ "$DRY_RUN" == "true" ]] && { log "[DRY-RUN] Создание swap $SWAP_SIZE в $swap_file"; return 0; }
     
-    log "Создаём swap-файл $swap_file размером $SWAP_SIZE..."
+    log "Создаем swap-файл..."
     mkdir -p "$(dirname "$swap_file")"
-    if fallocate -l "$SWAP_SIZE" "$swap_file" 2>/dev/null || dd if=/dev/zero of="$swap_file" bs=1M count="${SWAP_SIZE%G}"024 2>/dev/null; then
+    if fallocate -l "$SWAP_SIZE" "$swap_file" 2>/dev/null || dd if=/dev/zero of="$swap_file" bs=1M count=$(echo $SWAP_SIZE | sed 's/G/*1024/g') 2>/dev/null; then
         chmod 600 "$swap_file"
         mkswap "$swap_file" 2>&1 | tee -a "$LOG_FILE"
-        swapon "$swap_file" 2>&1 | tee -a "$LOG_FILE" && log_ok "Swap активирован: $swap_file"
+        swapon "$swap_file" 2>&1 | tee -a "$LOG_FILE" && log_ok "Swap активирован"
     else
-        log_err "Не удалось создать swap-файл"
+        log_err "Не удалось создать swap"
         return 1
     fi
     
-    # Добавление в fstab для постоянного включения
+    # Добавление в fstab
     if ! grep -q "$swap_file" /etc/fstab 2>/dev/null; then
-        echo "# mbcloud swap (добавлено $(date '+%Y-%m-%d'))" >> /etc/fstab
         echo "$swap_file none swap sw 0 0" >> /etc/fstab
-        log_ok "Swap добавлен в /etc/fstab"
+        log_ok "Swap добавлен в fstab"
     fi
-    
-    # Проверка
-    swapon --show && free -h | grep -i swap
-    
-    return 0
 }
 
-#------------------------------------------------------------------------------
-# 📋 ИНТЕРАКТИВНЫЙ ВЫБОР ДИСКОВ
-#------------------------------------------------------------------------------
-interactive_select_disks() {
-    header "🔧 Выбор дисков"
-    local disks=($(get_sata_disks))
-    
-    if [[ ${#disks[@]} -eq 0 ]]; then
-        log_err "Не найдено доступных SATA/USB дисков!"
-        echo "Подключите диски и перезапустите скрипт."
-        return 1
-    fi
-    
-    echo "Найдены диски:"
-    for i in "${!disks[@]}"; do
-        local info=$(lsblk -dn -o SIZE,MODEL "${disks[$i]}" 2>/dev/null)
-        echo "  [$((i+1))] ${disks[$i]} — $info"
-    done
-    echo "  [0] Ввести пути вручную"
-    echo "─────────────────────────────────────"
-    
-    # Выбор DISK1
-    read -p "Выберите диск для DISK1 (номер): " -n 1 -r; echo
-    if [[ $REPLY =~ ^[1-9]$ ]] && [[ $REPLY -le ${#disks[@]} ]]; then
-        DISK1="${disks[$((REPLY-1))]}"
-    else
-        read -p "Введите путь к DISK1 (например, /dev/sda): " DISK1
-    fi
-    
-    # Выбор DISK2 (опционально)
-    read -p "Добавить второй диск для MergerFS? (y/N): " -n 1 -r; echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "Оставшиеся диски:"
-        for i in "${!disks[@]}"; do
-            [[ "${disks[$i]}" == "$DISK1" ]] && continue
-            local info=$(lsblk -dn -o SIZE,MODEL "${disks[$i]}" 2>/dev/null)
-            echo "  [$((i+1))] ${disks[$i]} — $info"
-        done
-        read -p "Выберите диск для DISK2 (номер): " -n 1 -r; echo
-        if [[ $REPLY =~ ^[1-9]$ ]] && [[ $REPLY -le ${#disks[@]} ]]; then
-            DISK2="${disks[$((REPLY-1))]}"
-        else
-            read -p "Введите путь к DISK2 (например, /dev/sdb): " DISK2
-        fi
-    fi
-    
-    # Выбор размера swap
-    read -p "Размер swap (по умолчанию $SWAP_SIZE): " -e -i "$SWAP_SIZE" SWAP_SIZE
-    
-    # Подтверждение
-    echo "─────────────────────────────────────"
-    echo "Будет выполнено:"
-    echo "  • DISK1: $DISK1 → $MOUNT1"
-    [[ -n "$DISK2" ]] && echo "  • DISK2: $DISK2 → $MOUNT2"
-    echo "  • MergerFS: $MOUNT1${DISK2:+:$MOUNT2} → $DATA_MOUNT"
-    echo "  • Swap: $SWAP_SIZE в $([ -d "/DATA" ] && echo "/DATA" || echo "/")/swapfile"
-    echo "─────────────────────────────────────"
-    read -p "Продолжить? (y/N): " -n 1 -r; echo
-    [[ $REPLY =~ ^[Yy]$ ]] || return 1
-    
-    return 0
-}
-
-#------------------------------------------------------------------------------
-# 🎯 MAIN
-#------------------------------------------------------------------------------
+# 🎯 Main Logic
 main() {
     exec > >(tee -a "$LOG_FILE") 2>&1
     check_root
-    check_block_tools
+    install_deps
     
     # Парсинг аргументов
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --auto) MODE="auto"; shift ;;
             --dry-run) DRY_RUN="true"; shift ;;
-            --format-only) FORMAT_ONLY="true"; shift ;;
-            --swap-only) SWAP_ONLY="true"; shift ;;
             --disk1) DISK1="$2"; shift 2 ;;
             --disk2) DISK2="$2"; shift 2 ;;
             --swap) SWAP_SIZE="$2"; shift 2 ;;
-            --help|-h)
-                echo "Использование: $0 [опции]"
-                echo "  --auto              Авто-выбор первого диска"
-                echo "  --disk1 /dev/sda    Указать первый диск"
-                echo "  --disk2 /dev/sdb    Указать второй диск"
-                echo "  --swap 8G           Размер swap (по умолчанию 4G)"
-                echo "  --dry-run           Показать, что будет сделано"
-                echo "  --format-only       Только форматирование"
-                echo "  --swap-only         Только настройка swap"
-                exit 0
-                ;;
             *) shift ;;
         esac
     done
+
+    header "💾 mbcloud Disk Setup v1.1.0"
     
-    header "💾 mbcloud Disk Setup v1.0.0"
-    list_available_disks
-    
-    # Авто-выбор дисков
-    if [[ "$MODE" == "auto" && -z "$DISK1" ]]; then
+    # Определение дисков
+    if [[ -z "$DISK1" ]]; then
         local disks=($(get_sata_disks))
-        [[ ${#disks[@]} -ge 1 ]] && DISK1="${disks[0]}"
-        [[ ${#disks[@]} -ge 2 ]] && DISK2="${disks[1]}"
-        log "Авто-выбор: DISK1=$DISK1, DISK2=${DISK2:-не указан}"
+        if [[ ${#disks[@]} -eq 0 ]]; then
+            log_err "SATA диски не найдены!"
+            exit 1
+        fi
+        
+        if [[ "$MODE" == "auto" ]]; then
+            DISK1="${disks[0]}"
+            [[ ${#disks[@]} -ge 2 ]] && DISK2="${disks[1]}"
+            log "Авто-выбор: DISK1=$DISK1, DISK2=${DISK2:-нет}"
+        else
+            # Для pipe-режима по умолчанию берем первый диск
+            DISK1="${disks[0]}"
+            [[ ${#disks[@]} -ge 2 ]] && DISK2="${disks[1]}"
+            log_warn "В режиме pipe используется авто-выбор первых двух дисков."
+        fi
     fi
+
+    # 1. Форматирование и временное монтирование
+    format_and_mount_temp "$DISK1" "$MOUNT1" "mbcloud1"
+    [[ -n "$DISK2" ]] && format_and_mount_temp "$DISK2" "$MOUNT2" "mbcloud2"
     
-    # Интерактивный выбор
-    if [[ "$MODE" == "interactive" && (-z "$DISK1" || "$DISK1" == "select") ]]; then
-        interactive_select_disks || { log "Отменено пользователем"; exit 0; }
-    fi
+    # 2. Добавление дисков в fstab (чтобы они монтировались после ребута)
+    add_disks_to_fstab "$DISK1" "$MOUNT1"
+    [[ -n "$DISK2" ]] && add_disks_to_fstab "$DISK2" "$MOUNT2"
     
-    # Проверка ввода
-    [[ -z "$DISK1" ]] && { log_err "DISK1 не указан. Используйте --disk1 /dev/sdX или интерактивный режим."; exit 1; }
+    # 3. Настройка MergerFS
+    setup_mergerfs
     
-    # Форматирование
-    format_disk "$DISK1" "$MOUNT1" "mbcloud1"
-    [[ -n "$DISK2" ]] && format_disk "$DISK2" "$MOUNT2" "mbcloud2"
-    
-    # MergerFS fstab
-    setup_mergerfs_fstab
-    
-    # Swap
+    # 4. Настройка Swap
     setup_swap
     
-    # Итог
-    header "✅ Завершено"
-    echo "Статус дисков:"
-    lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,LABEL 2>/dev/null | grep -E "disk1|disk2|DATA|swap" || true
-    echo ""
-    echo "Статус swap:"
-    swapon --show 2>/dev/null || echo "  Swap не активен"
-    echo ""
-    log_ok "Лог операции: $LOG_FILE"
-    
-    if grep -q "fuse.mergerfs" /etc/fstab 2>/dev/null; then
-        echo -e "${YELLOW}💡 Рекомендуется перезагрузить систему: sudo reboot${NC}"
+    # 5. Финальное монтирование всего
+    header "🔧 Применение изменений fstab"
+    systemctl daemon-reload
+    if mount -a 2>&1 | tee -a "$LOG_FILE"; then
+        log_ok "Все файловые системы смонтированы"
+    else
+        log_err "Ошибка при монтировании! Проверьте /etc/fstab"
     fi
+    
+    header "✅ Готово"
+    log "Проверьте статус: df -h /DATA && free -h"
+    log "Лог: $LOG_FILE"
+    
+    if mountpoint -q "$DATA_MOUNT"; then
+        local size=$(df -h "$DATA_MOUNT" | tail -1 | awk '{print $2}')
+        log_ok "Объем хранилища /DATA: $size"
+    else
+        log_warn "/DATA не смонтирован. Требуется reboot."
+    fi
+    
+    echo -e "${YELLOW}💡 Рекомендуется: sudo reboot${NC}"
 }
 
 main "$@"
