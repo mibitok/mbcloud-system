@@ -46,7 +46,7 @@
 
 ```bash
 # 1. Подгатовка дисков
-# 1.1. Скачиваем скрипт в домашнюю папку
+  # 1.1. Скачиваем скрипт в домашнюю папку
 curl -fsSL https://raw.githubusercontent.com/mibitok/mbcloud-system/main/scripts/setup-disks.sh -o ~/setup-disks.sh
 
   # 1.2. Делаем его исполняемым
